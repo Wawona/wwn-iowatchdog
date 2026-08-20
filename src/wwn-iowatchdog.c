@@ -12,18 +12,15 @@
  *
  * Method selectors match /usr/libexec/watchdogd error strings on 25F80.
  *
- * On macOS 26, watchdogd holds exclusive type=1 IOWatchdogUserClient, so
- * IOServiceOpen fails with kIOReturnExclusiveAccess (or privilege
- * violation when the daemon is absent). Do NOT fall back to lldb attach:
- * that exited watchdogd with SIGTRAP (paniclog namespace 2 subcode 0x5)
- * and paniced the machine during install / app open / restore (2026-08-20).
- *
- * Until a non-lldb path exists (entitled user client or Apple-supported
- * API), disable/enable fail closed. Take Over must abort and leave Aqua.
+ * SAFETY (2026-08-20): By default this tool does NOT call IOServiceOpen,
+ * lsmp, or attach to watchdogd. Exclusive type=1 opens fail while
+ * watchdogd holds the client; the old lldb attach path exited watchdogd
+ * with SIGTRAP (paniclog namespace 2 subcode 0x5) and paniced the machine.
+ * Set WWN_IOWATCHDOG_ALLOW_OPEN=1 only when experimenting with a proven
+ * non-lldb path. Take Over must stay blocked until that exists.
  */
 #include <IOKit/IOKitLib.h>
 #include <errno.h>
-#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <stdio.h>
@@ -44,54 +41,16 @@ typedef struct {
 } wwn_iow_conn_t;
 
 static void usage(const char *argv0) {
-  fprintf(stderr, "usage: %s status|disable|enable\n", argv0);
+  fprintf(stderr,
+          "usage: %s status|disable|enable\n"
+          "  Default: refuse IOKit open (safe). Set "
+          "WWN_IOWATCHDOG_ALLOW_OPEN=1 to attempt type=1 open.\n",
+          argv0);
 }
 
-static pid_t find_watchdogd_pid(void) {
-  int bufsize = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-  if (bufsize <= 0)
-    return 0;
-  pid_t *pids = calloc((size_t)bufsize, 1);
-  if (!pids)
-    return 0;
-  bufsize = proc_listpids(PROC_ALL_PIDS, 0, pids, bufsize);
-  pid_t found = 0;
-  int n = bufsize / (int)sizeof(pid_t);
-  for (int i = 0; i < n; i++) {
-    if (pids[i] <= 0)
-      continue;
-    char name[32] = {0};
-    if (proc_name(pids[i], name, sizeof(name)) <= 0)
-      continue;
-    if (strcmp(name, "watchdogd") == 0) {
-      found = pids[i];
-      break;
-    }
-  }
-  free(pids);
-  return found;
-}
-
-static int lsmp_iowatchdog_port_name(pid_t wd, mach_port_name_t *out_name) {
-  char cmd[64];
-  snprintf(cmd, sizeof(cmd), "/usr/bin/lsmp -p %d", (int)wd);
-  FILE *f = popen(cmd, "r");
-  if (!f)
-    return -1;
-  char line[512];
-  int found = 0;
-  while (fgets(line, sizeof(line), f)) {
-    if (strstr(line, "IOWatchdogUserClient") == NULL)
-      continue;
-    unsigned name = 0;
-    if (sscanf(line, "0x%x", &name) == 1 && name != 0) {
-      *out_name = (mach_port_name_t)name;
-      found = 1;
-      break;
-    }
-  }
-  pclose(f);
-  return found ? 0 : -1;
+static int allow_open(void) {
+  const char *v = getenv("WWN_IOWATCHDOG_ALLOW_OPEN");
+  return v != NULL && v[0] == '1' && v[1] == '\0';
 }
 
 static void close_conn(wwn_iow_conn_t *c) {
@@ -134,27 +93,41 @@ static int call_scalar(io_connect_t conn, uint32_t selector,
   return 0;
 }
 
+static int refuse_closed(const char *cmd) {
+  fprintf(stderr,
+          "wwn-iowatchdog: %s refused (default fail-closed). Do not unload "
+          "com.apple.watchdogd. IOServiceOpen / lsmp / lldb against "
+          "watchdogd are disabled after SIGTRAP panics (2026-08-20). Set "
+          "WWN_IOWATCHDOG_ALLOW_OPEN=1 only for a proven exclusive-open "
+          "experiment.\n",
+          cmd);
+  return 1;
+}
+
 static int run_selector(uint32_t selector, const char *label) {
+  if (!allow_open())
+    return refuse_closed(label);
   wwn_iow_conn_t c = open_watchdog();
   if (c.connection != IO_OBJECT_NULL) {
     int rc = call_scalar(c.connection, selector, label);
     close_conn(&c);
     return rc;
   }
-  /*
-   * No direct user client. Never attach lldb (2026-08-20 SIGTRAP panics).
-   * Take Over must abort; reboot restores kernel monitoring if it was
-   * previously disabled somehow.
-   */
   fprintf(stderr,
           "wwn-iowatchdog: %s unavailable (IOWatchdogUserClient exclusive to "
-          "watchdogd; lldb fallback removed after kernel panics). Do not "
-          "unload com.apple.watchdogd.\n",
+          "watchdogd; no lldb fallback). Do not unload "
+          "com.apple.watchdogd.\n",
           label);
   return 1;
 }
 
 static int cmd_status(void) {
+  if (!allow_open()) {
+    printf("wwn-iowatchdog: status (fail-closed; no IOKit open)\n");
+    printf("  disable/enable: refused without WWN_IOWATCHDOG_ALLOW_OPEN=1\n");
+    printf("  unload com.apple.watchdogd: forbidden\n");
+    return 0;
+  }
   wwn_iow_conn_t c = open_watchdog();
   if (c.connection != IO_OBJECT_NULL) {
     int a = call_scalar(c.connection, kIOWatchdogDaemonCheckEnabled,
@@ -164,19 +137,9 @@ static int cmd_status(void) {
     close_conn(&c);
     return (a == 0 || b == 0) ? 0 : 1;
   }
-  pid_t wd = find_watchdogd_pid();
-  mach_port_name_t port = 0;
-  int have_port = (wd > 0 && lsmp_iowatchdog_port_name(wd, &port) == 0);
-  printf("wwn-iowatchdog: status (no direct connection)\n");
-  printf("  watchdogd pid: %d\n", (int)wd);
-  if (have_port)
-    printf("  IOWatchdogUserClient port: 0x%x (exclusive to watchdogd)\n",
-           (unsigned)port);
-  else
-    printf("  IOWatchdogUserClient: not listed\n");
-  printf("  disable/enable: blocked without exclusive open "
-         "(lldb fallback removed)\n");
-  return (wd > 0 && have_port) ? 0 : 1;
+  printf("wwn-iowatchdog: status (ALLOW_OPEN set; no connection)\n");
+  printf("  disable/enable: blocked without exclusive open\n");
+  return 1;
 }
 
 int main(int argc, char **argv) {

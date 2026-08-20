@@ -24,15 +24,16 @@ Consumers: **Wawona** (L4) bundles the binary into desktop-host Mode B
 
 ## Hard safety rules (macOS 26 / 25F80)
 
-1. **Never** `lldb` attach to `watchdogd` to rewrite IOWatchdog selectors.
-   Exit reason namespace 2 / subcode 0x5 (SIGTRAP) while kernel monitoring is
-   armed panics the box (`watchdogd[pid] exited`).
+1. **Never** `lldb` / debugserver attach to `watchdogd` (including Cursor
+   `lldb_mcp`). Exit reason namespace 2 / subcode 0x5 (SIGTRAP) while kernel
+   monitoring is armed panics the box (`watchdogd[pid] exited`).
 2. **Never** unload / `kickstart -k` `com.apple.watchdogd` unless
-   `wwn-iowatchdog disable` has already succeeded.
-3. Without exclusive `IOServiceOpen` type=1, **fail closed**. Take Over must
-   abort and leave Aqua.
-4. Stage / install must not probe disable/enable against a live armed
-   watchdog.
+   `wwn-iowatchdog disable` has already succeeded via a proven exclusive
+   open.
+3. Default CLI is **fail closed**: no `IOServiceOpen`, no `lsmp` against
+   `watchdogd`. Set `WWN_IOWATCHDOG_ALLOW_OPEN=1` only for experiments.
+4. Stage / install / blocked Take Over must not probe disable/enable or
+   install `ws-guard` until KEEP_WS probe inject.
 
 ## Build / run
 
