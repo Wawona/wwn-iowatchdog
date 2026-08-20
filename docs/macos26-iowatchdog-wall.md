@@ -70,8 +70,26 @@ Do not bootout `com.apple.watchdogd` without a successful disable ACK.
 ## Possible future paths (not implemented)
 
 - Third-party-unavailable platform inject entitlements.
-- Separate research: whether CoreBedtime unload-WS also panics on 25F80.
 - New written plan only; no ad-hoc inject on the daily driver.
+
+## CoreBedtime research (2026-08-20, KEEP_WS only)
+
+Upstream [CoreBedtime/iland](https://github.com/CoreBedtime/iland)
+`install-weston.sh` is identical to the vendored copy: last step is
+`launchctl unload -w …/com.apple.WindowServer.plist`. Repo search finds
+**zero** `watchdogd` / `IOWatchdog` / `iowatchdog` handling.
+
+| Test | Result |
+|------|--------|
+| Full Classic (`install-weston.sh` unload WS) | **Not run** on 25F80 (predicted 120s userspace-watchdog panic; same class as prior Mode B incidents) |
+| KEEP_WS inject: `DYLD_INSERT_LIBRARIES=libwayland-mac.dylib` + compositor | **Constructor OK**: extracts `/tmp/libwayland-support/{framebufferd,inputd,amfiexceptiond}`, hooks amfid, starts `framebufferd` (CoreDisplay / in-server present). `WindowServer` + `watchdogd` stayed up; no panic |
+| Bundled `weston --backend=drm` (wwn-weston result) | Exits: missing `drm-backend.so` store path |
+| Bundled Wawona `niri` + insert | Exits: Wawona niri refuses bare host Wayland (`no host Wayland display`); helpers still spawned |
+
+Conclusion: CoreBedtime’s **inject/present** model still works under KEEP_WS on
+25F80. Their **Classic unload-WS** path has no IOWatchdog disable and is
+not safer than Wawona’s blocked Take Over on this OS. Does not unblock
+Phase 1.
 
 ## Hook dylib
 
