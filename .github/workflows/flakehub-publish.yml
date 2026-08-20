@@ -1,0 +1,30 @@
+name: FlakeHub publish
+
+# Public rolling FlakeHub *releases* (registry), not the binary cache.
+# Docs: https://docs.determinate.systems/flakehub/publishing/
+
+on:
+  push:
+    branches: [development]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  flakehub-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - uses: DeterminateSystems/flakehub-push@main
+        with:
+          name: Wawona/wwn-iowatchdog
+          rolling: true
+          visibility: public
+          # Darwin-only packages: skip full output-path inspect on ubuntu.
+          include-output-paths: false
+          # flake show still needs a clean packages set (aarch64-darwin only).
+          my-flake-is-too-big: true
