@@ -15,8 +15,10 @@ L3′ **macOS Watchdog tools** for Wawona Desktop Mode B.
 
 ## macOS 26 wall
 
-`thread_set_state` on watchdogd SIGKILLs the caller. IOKit port extract
-and GOT patch fail. Take Over in Wawona stays blocked. Full table:
+**25F80 Classic blocked (Phase 1.4).** `thread_set_state` is panic-class.
+IOKit extract fails. AMFI boot-arg did not unlock a proven
+`DisableUserspaceMonitoring` path. `disable`/`enable`/`inject` stay fail
+closed. Take Over in Wawona stays `blocked-no-iowatchdog`. Full table:
 `docs/macos26-iowatchdog-wall.md`.
 
 ## DAG

@@ -5,12 +5,12 @@
  * mach_port_kobject_description (works on 25F80).
  *
  * disable/enable: intended path was thread-hijack or GOT trampoline inside
- * watchdogd. On macOS 26 / 25F80 those are blocked:
- *   - thread_set_state(watchdogd) => caller SIGKILL
+ * watchdogd. On macOS 26 / 25F80 Classic Take Over is Phase 1.4 blocked:
+ *   - thread_set_state(watchdogd) => caller SIGKILL (panic-class risk)
  *   - mach_port_extract_right(IOKit) => KERN_INVALID_CAPABILITY
- *   - mach_vm_protect/write on auth-ptr GOT => protection failure
- * So disable/enable fail closed (never lldb). Take Over stays blocked until
- * a working primitive exists.
+ *   - IOConnect-targeted GOT hijack => not proven (amfi RO COW is not enough)
+ * So disable/enable fail closed (never lldb). See
+ * docs/macos26-iowatchdog-wall.md.
  */
 #include "../common/wwn_iowatchdog.h"
 
@@ -95,12 +95,13 @@ int wwn_remote_ioconnect_scalar(pid_t pid, mach_port_name_t port_name,
     return -1;
   }
   fprintf(stderr,
-          "wwn-iowatchdog: disable/enable blocked on this macOS build.\n"
+          "wwn-iowatchdog: Classic disable/enable blocked on 25F80 "
+          "(Phase 1.4).\n"
           "  Port steal (extract_right) = KERN_INVALID_CAPABILITY.\n"
-          "  thread_set_state(watchdogd) = caller SIGKILL.\n"
-          "  GOT/auth-ptr patch = protection failure.\n"
+          "  thread_set_state(watchdogd) = caller SIGKILL / panic-class.\n"
+          "  IOConnect GOT hijack = not proven after amfi boot-arg pass.\n"
           "  lldb attach = panic (forbidden).\n"
-          "  Take Over must stay blocked. See docs/macos26-iowatchdog-wall.md\n");
+          "  Take Over stays blocked. See docs/macos26-iowatchdog-wall.md\n");
   return -1;
 }
 
