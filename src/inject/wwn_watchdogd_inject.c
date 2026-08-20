@@ -63,7 +63,7 @@ int wwn_find_iowatchdog_port_name(pid_t pid, mach_port_name_t *out_name) {
   }
   int found = 0;
   for (mach_msg_type_number_t i = 0; i < namesCnt; i++) {
-    ipc_info_object_type_t kotype = 0;
+    natural_t kotype = 0;
     mach_vm_address_t kobject = 0;
     kobject_description_t desc;
     memset(desc, 0, sizeof(desc));
