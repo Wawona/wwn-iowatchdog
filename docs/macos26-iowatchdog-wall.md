@@ -69,10 +69,11 @@ Do not bootout `com.apple.watchdogd` without a successful disable ACK.
 
 ## Possible future paths
 
-- Prove Path A claim across reboot (60s hold).
+- Prove Path A claim across reboot (sticky marker + 60s). Checklist in wall.
 - Prove Path B sock after a non-lldb hook load.
 - Then a separate plan for Wawona Take Over flip.
 - Do not re-run `thread_set_state` / lldb on the daily driver.
+- Java ≥17 HotSpot on 25F80 still SIGBUS; revisit for Ghidra headless.
 
 ## CoreBedtime research (2026-08-20, KEEP_WS only)
 
@@ -93,52 +94,74 @@ Conclusion: CoreBedtime’s **inject/present** model still works under KEEP_WS o
 not safer than Wawona’s blocked Take Over on this OS. Does not unblock
 Phase 1.
 
-## GhidraVibe RE (2026-08-20)
+## GhidraVibe RE (2026-08-20, updated same day)
 
-Headless Ghidra 12.1 on this machine hit **Java 21 Zulu SIGBUS**
-(`BUS_ADRALN` in CodeHeap) even after freeing RAM. MS OpenJDK 11 runs;
-Ghidra 12 wants 21. Cursor `~/.cursor/mcp.json` is **home-manager managed**
-and still pointed at missing `GhidraMCP_Vibe_RSE`. Bridges are built at
-`~/GhidraVibe/result-ghidra-vibe-fresh/share/ghidra-mcp/`; rewrite HM MCP
-entries to those absolute uv bridges when HM is next switched. RE below is
-from **llvm-objdump / strings** on thin arm64e slices under `/tmp/wwn-re/`.
+### Toolchain
+
+| Item | Status |
+|------|--------|
+| Cursor MCP (`ghidra` / `ghidra-vibe` / `ghidra-vibe-rag`) | **Fixed** via nix-darwin `.dotfiles` → `~/GhidraVibe#ghidra-vibe` uv wrappers |
+| Headless Ghidra 12 (needs Java 21) | **Blocked on this host**: Zulu 21, Temurin 21, and Temurin 17 all SIGBUS in `CodeHeap::allocate` (`BUS_ADRALN`). MS OpenJDK 11 works. ~2 GiB free RAM; not a memory-pressure issue. Decompile via **ipsw + llvm-objdump** instead |
+| Project import / MCP decompile | Deferred until a working HotSpot ≥17 exists on 25F80 |
+
+### Artifacts under `/tmp/wwn-re/`
+
+- Thin userspace: `watchdogd.arm64e`, `sysstatuscheck.arm64e`, `mobile_obliterator.arm64e`, `WindowServer.arm64e`
+- KC: `kc/kernelcache.decompressed` + extracted `kc/com.apple.driver.AppleARMWatchdogTimer` (via `ipsw kernel extract`, UUID `BDBB2E95-…`, source 333.0.0.0.0)
+
+### Userspace (llvm-objdump)
 
 | Target | Finding |
 |--------|---------|
-| `AppleARMWatchdogTimer.kext` | Bundle on disk has **no** `Contents/MacOS` executable (KC-resident only). No userspace seize API visible without KC extract. |
-| `/usr/libexec/watchdogd` | `IOServiceOpen(IOWatchdog, type=1)`. Selectors on 25F80: CheckEnabled=0, **Checkin=1**, DisableUserspaceMonitoring=3, Reenable=4, CheckUserspaceDefanged=5. Holds exclusive client for life of process. |
-| `/usr/libexec/sysstatuscheck` | Same open type=1; Checkin sel=1. No disable path. Confirms exclusive + entitlement class. |
-| `/usr/libexec/mobile_obliterator` | **No** `IOWatchdog` / `DisableUserspace` strings on this 25F80 build (earlier research applied to other OS/images). Do not invoke as a helper. |
-| WindowServer / SkyLight / loginwindow | No direct `IOWatchdog` user client open found. Userspace monitoring is **watchdogd** polling service checkins; unloading WS without sel=3 still yields the ~120s userspace-watchdog panic class. |
+| `watchdogd` | `IOServiceOpen(IOWatchdog, type=1)`. Selectors: CheckEnabled=0, **Checkin=1**, Disable=3, Reenable=4, CheckUserspaceDefanged=5 |
+| `sysstatuscheck` | Same open type=1; Checkin=1 only |
+| `mobile_obliterator` | No IOWatchdog strings on this 25F80 build |
+| WindowServer | No direct IOWatchdog open; watchdogd polls service checkins |
 
-### Answers to plan questions
+### Kext (`IOWatchdog::newUserClient` / disable / close / checkWatchdog)
 
-1. **Exclusive policy:** type=1 is single-client. Live open while watchdogd holds returns `0xe00002c5`. No second-client / seize found in userspace RE. Default: **claim-hold**.
-2. **Disable sticky?** Unproven without kext. Claim daemon re-enables on exit before close.
-3. **Entitlement:** `com.apple.private.iowatchdog.user-access` required for open (forged ad-hoc under SIP-off + AMFI-relaxed works; does not beat exclusive).
-4. **Obliterator:** not present as IOWatchdog helper on this build.
-5. **WindowServer checkin:** via watchdogd service monitoring, not a direct IOWatchdog open in WS. Classic unload still requires disable ACK first.
+1. **Exclusive / seize:** type must be `1`. Existing client pointer at object `+0x98` non-null → return `0xe00002c5` (exclusive). **No seize / second client.** Root privilege + `copyClientEntitlement(…, "com.apple.private.iowatchdog.user-access")` required (enforced in kext `newUserClient`).
+2. **Disable sticky?** **Yes.** `userspaceDisableUserspaceMonitoring` clears flag at `+0xa8` and timer state at `+0xb0`. `userClientClose` only stores null to `+0x98` (frees exclusive). Does **not** restore `+0xa8`. `userspaceCheckin` does **not** re-set `+0xa8`.
+3. **`checkWatchdog`:** `ldrb [obj,#0xa8]`; if clear, early-out (no userspace timeout panic path). So sticky disable survives client close and later watchdogd open/checkin.
+4. **Entitlement:** string `com.apple.private.iowatchdog.user-access` checked in-kext via `IOUserClient::copyClientEntitlement` after a `"root"` privilege check. AMFI still gates whether the entitlement is present on the task; forge works under SIP-off + AMFI-relaxed as previously verified.
+5. **Defang:** separate refcount path (`increaseDefangRefCount` / `toggleUserSpaceMonitoringWithReason`); not required for Classic disable.
 
-## Dual-path (0.3.0)
+### Design consequence
+
+- Path A claim default is **sticky-release**: open → disable → close → exit (no Reenable). `KeepAlive` false.
+- `--hold` keeps exclusive until SIGTERM (still no Reenable on exit).
+- Path B still needs a non-lldb hook load into watchdogd for the Unix sock; sticky disable alone does not load the hook.
+
+## Dual-path (0.3.x)
 
 | Path | Mechanism | When it works |
 |------|-----------|---------------|
-| **A direct** | Entitled `IOServiceOpen` type=1 + sel 3/4 | Client free (no watchdogd hold) |
-| **A claim** | Opt-in LaunchDaemon `wwn-iowatchdog-claim` opens, disables, **holds** | Boot race before watchdogd |
-| **B sock** | Unix socket to `libwwn_watchdogd_hook.dylib` in watchdogd | Hook loaded; live soft-inject still fail-closed |
+| **A direct** | Entitled `IOServiceOpen` type=1 + sel 3/4 | Client free |
+| **A claim** | Boot LaunchDaemon: disable then sticky-release (or `--hold`) | Wins race before watchdogd |
+| **B sock** | Unix socket to `libwwn_watchdogd_hook.dylib` | Hook loaded; live soft-inject fail-closed |
 | Live soft-inject | `thread_set_state` / GOT | **Blocked** (Phase 1.4) |
 
-CLI: `disable`/`enable` try A then B. `status` reports pathA/sock/marker/claim.
-`inject-launchd` only with disable marker. **Wawona Take Over stays
-`blocked-no-iowatchdog` until proof gates.**
+### Proof gates
 
-### Proof gates (not yet run)
+1. Path A claim across reboot (sticky marker + 60s, no panic) — **human-gated** (see checklist below).
+2. Path B sock round-trip 60s after non-lldb hook load — **open**.
+3. Wawona Take Over flip — **separate plan only**; stays `blocked-no-iowatchdog`.
 
-1. Path A stable 60s with claim held (reboot after `claim-install`).
-2. Path B sock round-trip 60s after hook is actually loaded.
-3. Separate plan before flipping Settings Take Over.
+### Claim reboot checklist (p1; do not auto-reboot)
+
+```text
+1. pgrep -lf lldb_mcp || echo lldb_mcp_gone   # must be gone
+2. nix build ./wwn-iowatchdog#wwn-iowatchdog
+3. sudo ./result/bin/wwn-iowatchdog claim-install
+4. sudo launchctl bootstrap system \
+     /Library/LaunchDaemons/com.aspauldingcode.wwn-iowatchdog-claim.plist
+5. Reboot (user-approved only)
+6. After login: sudo ./result/bin/wwn-iowatchdog status
+   Expect: marker=yes, pathA may be exclusive|free, claim file or sticky marker
+7. Hold 60s; confirm no panic; cat marker
+8. Optional: sudo ./result/bin/wwn-iowatchdog enable  # only when done testing
+```
 
 ## Hook dylib
 
-`libwwn_watchdogd_hook.dylib` (arm64e) is Path B. Load only after disable
-ACK (claim) via a future boot-time path; never via lldb.
+`libwwn_watchdogd_hook.dylib` (arm64e) is Path B. Load only after disable ACK via a future boot-time path; never via lldb.

@@ -12,7 +12,7 @@
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.3.0";
+        version = "0.3.1";
         src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
         # Hook MUST be arm64e (watchdogd is arm64e). CLI/claim are host arm64.

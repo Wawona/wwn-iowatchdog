@@ -185,7 +185,7 @@ static int claim_install(const char *claim_bin) {
           "  <key>RunAtLoad</key>\n"
           "  <true/>\n"
           "  <key>KeepAlive</key>\n"
-          "  <true/>\n"
+          "  <false/>\n"
           "  <key>UserName</key>\n"
           "  <string>root</string>\n"
           "  <key>StandardErrorPath</key>\n"
@@ -200,6 +200,7 @@ static int claim_install(const char *claim_bin) {
           "wwn-iowatchdog: wrote %s\n"
           "  bootstrap: launchctl bootstrap system %s\n"
           "  Reboot so claim can race watchdogd for exclusive open.\n"
+          "  Default claim is sticky-release (disable, close, exit).\n"
           "  Do not kickstart -k watchdogd.\n",
           claim_plist_path, claim_plist_path);
   return 0;

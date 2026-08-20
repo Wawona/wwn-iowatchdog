@@ -1,6 +1,13 @@
 /*
- * Opt-in claim daemon: open IOWatchdog type=1, DisableUserspaceMonitoring,
- * then hold the exclusive connection until SIGTERM.
+ * Opt-in claim helper: open IOWatchdog type=1, DisableUserspaceMonitoring.
+ *
+ * Default (sticky-release, from 25F80 kext RE): after disable ACK, close the
+ * client and exit. userClientClose clears the exclusive slot (+0x98) but does
+ * NOT restore the monitoring flag (+0xa8). checkWatchdog early-outs when
+ * +0xa8 is clear. So monitoring stays off and watchdogd may open later.
+ *
+ * --hold: keep the exclusive connection until SIGTERM (legacy race hold).
+ * Do not re-enable on exit in either mode (sticky is intentional).
  *
  * Boot race: must win open before watchdogd. Install via claim-install and
  * reboot. Never unload watchdogd without a disable ACK.
@@ -25,8 +32,19 @@ static void on_signal(int sig) {
 }
 
 int main(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
+  int hold = 0;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--hold") == 0)
+      hold = 1;
+    else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+      fprintf(stderr,
+              "usage: wwn-iowatchdog-claim [--hold]\n"
+              "  default: disable, close, exit (sticky-after-close)\n"
+              "  --hold: keep exclusive until SIGTERM\n");
+      return 0;
+    }
+  }
+
   if (geteuid() != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim: must run as root\n");
     return 1;
@@ -64,13 +82,24 @@ int main(int argc, char **argv) {
   mkdir("/tmp/libwayland-support", 0755);
   FILE *mf = fopen(WWN_IOW_DISABLED_MARKER, "w");
   if (mf) {
-    fputs("claim\n", mf);
+    fputs(hold ? "claim-hold\n" : "claim-sticky\n", mf);
     fclose(mf);
   }
   FILE *cf = fopen(WWN_IOW_CLAIM_MARKER, "w");
   if (cf) {
-    fprintf(cf, "pid=%d\n", (int)getpid());
+    fprintf(cf, "pid=%d mode=%s\n", (int)getpid(),
+            hold ? "hold" : "sticky-release");
     fclose(cf);
+  }
+
+  if (!hold) {
+    /* Sticky: close without ReenableUserspaceMonitoring. */
+    IOServiceClose(conn);
+    fprintf(stderr,
+            "wwn-iowatchdog-claim: disable ACK; closed exclusive "
+            "(sticky-after-close). pid=%d\n",
+            (int)getpid());
+    return 0;
   }
 
   fprintf(stderr,
@@ -81,13 +110,11 @@ int main(int argc, char **argv) {
   while (!g_stop)
     sleep(1);
 
-  /* Re-enable before release so a later watchdogd open is not racing a
-   * sticky-unknown state. Sticky-after-close is unproven on 25F80 kext. */
-  (void)IOConnectCallScalarMethod(
-      conn, kIOWatchdogDaemonReenableUserspaceMonitoring, NULL, 0, NULL, NULL);
+  /* Hold mode exit: still do NOT re-enable (sticky intentional). */
   IOServiceClose(conn);
   unlink(WWN_IOW_CLAIM_MARKER);
-  unlink(WWN_IOW_DISABLED_MARKER);
-  fprintf(stderr, "wwn-iowatchdog-claim: released\n");
+  fprintf(stderr,
+          "wwn-iowatchdog-claim: released exclusive; monitoring left disabled "
+          "(sticky)\n");
   return 0;
 }
