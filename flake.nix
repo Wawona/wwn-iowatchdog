@@ -1,5 +1,5 @@
 {
-  description = "wwn-iowatchdog: macOS Watchdog tools for Wawona Desktop Mode B (IOWatchdog userspace monitoring, watchdogd safety). Never for iOS / App Store.";
+  description = "wwn-iowatchdog: macOS Watchdog tools for Wawona Desktop Mode B (soft-inject arm64e hook into watchdogd; IOWatchdog disable/enable over Unix socket). Never for iOS / App Store.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -7,40 +7,61 @@
 
   outputs = { self, nixpkgs }:
     let
-      # Host tools only. No Apple mobile / Android matrix.
-      # Nixpkgs 26.11 throws on x86_64-darwin eval; flakehub-push --all-systems
-      # needs a clean show, so omit Intel Darwin (same as other Wawona flakes).
       darwinSystems = [ "aarch64-darwin" ];
       forAll = nixpkgs.lib.genAttrs darwinSystems;
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.1.0";
-        src = ./src;
+        version = "0.2.0";
+        src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
+        # Hook MUST be arm64e (watchdogd is arm64e). CLI/inject are host arm64.
         buildPhase = ''
           runHook preBuild
+          mkdir -p build
+
+          # arm64e hook dylib (loaded into /usr/libexec/watchdogd)
+          $CC -O2 -Wall -Wextra -dynamiclib \
+            -arch arm64e \
+            -install_name /usr/local/lib/libwwn_watchdogd_hook.dylib \
+            -o build/libwwn_watchdogd_hook.dylib \
+            src/hook/wwn_watchdogd_hook.c \
+            -framework IOKit -framework CoreFoundation
+
+          # CLI + injector (host arch). Never link lldb.
           $CC -O2 -Wall -Wextra \
-            -framework IOKit -framework CoreFoundation \
-            -o wwn-iowatchdog wwn-iowatchdog.c
+            -arch arm64e \
+            -o build/wwn-iowatchdog \
+            src/wwn-iowatchdog.c \
+            src/inject/wwn_watchdogd_inject.c \
+            -framework IOKit -framework CoreFoundation
+
+          $CC -O2 -Wall -Wextra -DWWN_INJECT_MAIN \
+            -arch arm64e \
+            -o build/wwn-watchdogd-inject \
+            src/inject/wwn_watchdogd_inject.c \
+            -framework CoreFoundation
+
+          file build/libwwn_watchdogd_hook.dylib build/wwn-iowatchdog
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
-          mkdir -p $out/bin
-          install -m755 wwn-iowatchdog $out/bin/wwn-iowatchdog
+          mkdir -p $out/bin $out/lib
+          install -m755 build/wwn-iowatchdog $out/bin/wwn-iowatchdog
+          install -m755 build/wwn-watchdogd-inject $out/bin/wwn-watchdogd-inject
+          install -m755 build/libwwn_watchdogd_hook.dylib \
+            $out/lib/libwwn_watchdogd_hook.dylib
           runHook postInstall
         '';
         meta = with pkgs.lib; {
-          description = "Disable/re-enable macOS kernel IOWatchdog userspace monitoring (Desktop Mode B)";
+          description = "Soft-inject arm64e hook into watchdogd; disable/re-enable IOWatchdog userspace monitoring (Desktop Mode B)";
           platforms = platforms.darwin;
           license = licenses.mit;
         };
       };
     in
     {
-      # L3′ helper fragment. Not a graphics registry key; Wawona copies the
-      # binary into Contents/Library/Wawona/ for desktop-host Mode B only.
       packages = forAll (system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -62,10 +83,7 @@
         };
       });
 
-      # Future Watchdog tools land under src/ and get packages here.
-      # Consumers: Wawona flake only (never L0-L2 flake inputs).
       lib = {
-        # Convenience for callPackage / macos.nix: path to the bin derivation.
         mkPackage = { pkgs }: mkIowatchdog pkgs;
       };
 

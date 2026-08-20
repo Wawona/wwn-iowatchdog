@@ -8,40 +8,33 @@ artifacts.
 
 ## Tools
 
-| Tool | Purpose |
-|------|---------|
-| `wwn-iowatchdog` | `status` / `disable` / `enable` userspace IOWatchdog monitoring so Mode B may unload `com.apple.watchdogd` without an immediate XNU panic |
+| Artifact | Purpose |
+|----------|---------|
+| `bin/wwn-iowatchdog` | `status` / `disable` / `enable` / `inject` |
+| `lib/libwwn_watchdogd_hook.dylib` | arm64e hook for a future soft-inject path |
 
-More Watchdog-related CLIs belong in this repo (not in `Wawona/` or
-`wwn-iland`).
+On macOS 26 (25F80), `disable`/`enable`/`inject` are **fail closed**: see
+[docs/macos26-iowatchdog-wall.md](docs/macos26-iowatchdog-wall.md).
+`status` can still locate the live `IOWatchdogUserClient` port name.
 
 ## Layer (repo DAG)
 
-**L3′**. Depends on `nixpkgs` only (no `wwn-toolchain` / `wwn-iland`).
-Consumers: **Wawona** (L4) bundles the binary into desktop-host Mode B
-(`Contents/Library/Wawona/wwn-iowatchdog`). See
-[`Wawona/docs/wwn-repo-dag.md`](https://github.com/Wawona/Wawona/blob/development/docs/wwn-repo-dag.md).
+**L3′**. Depends on `nixpkgs` only. Consumers: **Wawona** (L4) desktop-host
+Mode B only. See Wawona `docs/wwn-repo-dag.md`.
 
-## Hard safety rules (macOS 26 / 25F80)
+## Hard safety rules
 
-1. **Never** `lldb` / debugserver attach to `watchdogd` (including Cursor
-   `lldb_mcp`). Exit reason namespace 2 / subcode 0x5 (SIGTRAP) while kernel
-   monitoring is armed panics the box (`watchdogd[pid] exited`).
-2. **Never** unload / `kickstart -k` `com.apple.watchdogd` unless
-   `wwn-iowatchdog disable` has already succeeded via a proven exclusive
-   open.
-3. Default CLI is **fail closed**: no `IOServiceOpen`, no `lsmp` against
-   `watchdogd`. Set `WWN_IOWATCHDOG_ALLOW_OPEN=1` only for experiments.
-4. Stage / install / blocked Take Over must not probe disable/enable or
-   install `ws-guard` until KEEP_WS probe inject.
+1. **Never** lldb / debugserver / Cursor `lldb_mcp` on `watchdogd`.
+2. **Never** unload / `kickstart -k` `com.apple.watchdogd` without a
+   successful disable ACK.
+3. Do not treat experimental inject as proven on 25F80.
 
 ## Build / run
 
 ```bash
 nix build .#wwn-iowatchdog
 sudo ./result/bin/wwn-iowatchdog status
-# disable / enable require root and a working exclusive open (often blocked
-# while watchdogd holds IOWatchdogUserClient).
+# disable / enable currently fail closed on macOS 26 (see docs).
 ```
 
 ## License
