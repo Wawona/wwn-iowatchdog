@@ -18,7 +18,8 @@ artifacts.
 
 1. **Path A:** entitled direct `IOServiceOpen(IOWatchdog, type=1)` + selector
    3/4. Wins only when the client is free; use **claim** LaunchDaemon to win
-   the boot race against `watchdogd`.
+   the boot race. Default claim is **sticky-release** (disable, close, exit);
+   `--hold` keeps exclusive until SIGTERM.
 2. **Path B:** Unix socket to the hook inside `watchdogd` when loaded.
 3. Live soft-inject (`thread_set_state` / GOT) stays **fail closed** on
    macOS 26 / 25F80. See [docs/macos26-iowatchdog-wall.md](docs/macos26-iowatchdog-wall.md).

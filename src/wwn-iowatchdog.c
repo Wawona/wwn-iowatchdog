@@ -133,9 +133,9 @@ static int cmd_status(void) {
          (int)pid, have_port ? "" : "none/", have_port ? (unsigned)port : 0u,
          a_state, sock ? "up" : "down", marker ? "yes" : "no",
          claim ? "held" : "no");
-  printf("capability: Path A entitled open when free; claim-hold for boot "
-         "race; Path B sock after hook load. No seize on 25F80. Take Over "
-         "stays blocked until proofs.\n");
+  printf("capability: Path A entitled open when free; claim sticky-release "
+         "(or --hold); Path B sock after hook load. No seize on 25F80; "
+         "disable sticky after close. Take Over stays blocked until proofs.\n");
   return 0;
 }
 
