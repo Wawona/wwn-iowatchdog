@@ -22,15 +22,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#define WWN_IOW_SOCK_PATH "/var/run/wwn-iowatchdog.sock"
-
-enum {
-  kIOWatchdogDaemonCheckEnabled = 0,
-  kIOWatchdogDaemonCheckUserspaceDefanged = 1,
-  kIOWatchdogDaemonCheckin = 2,
-  kIOWatchdogDaemonDisableUserspaceMonitoring = 3,
-  kIOWatchdogDaemonReenableUserspaceMonitoring = 4,
-};
+#include "../common/wwn_iowatchdog.h"
 
 typedef kern_return_t (*iocall_fn)(mach_port_t connection, uint32_t selector,
                                    const uint64_t *input,

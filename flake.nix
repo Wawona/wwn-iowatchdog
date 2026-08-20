@@ -1,5 +1,5 @@
 {
-  description = "wwn-iowatchdog: macOS Watchdog tools for Wawona Desktop Mode B (soft-inject arm64e hook into watchdogd; IOWatchdog disable/enable over Unix socket). Never for iOS / App Store.";
+  description = "wwn-iowatchdog: macOS Watchdog tools for Wawona Desktop Mode B (Path A entitled open + claim; Path B arm64e hook sock). Never for iOS / App Store.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -12,10 +12,10 @@
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.2.0";
+        version = "0.3.0";
         src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
-        # Hook MUST be arm64e (watchdogd is arm64e). CLI/inject are host arm64.
+        # Hook MUST be arm64e (watchdogd is arm64e). CLI/claim are host arm64.
         buildPhase = ''
           runHook preBuild
           mkdir -p build
@@ -28,26 +28,48 @@
             src/hook/wwn_watchdogd_hook.c \
             -framework IOKit -framework CoreFoundation
 
-          # CLI + injector helpers (host arch). Never link lldb.
+          # CLI (host arch). Path A + Path B + claim helpers. Never link lldb.
           $CC -O2 -Wall -Wextra \
             -o build/wwn-iowatchdog \
             src/wwn-iowatchdog.c \
+            src/direct/wwn_iowatchdog_direct.c \
+            src/sock/wwn_iowatchdog_sock.c \
             src/inject/wwn_watchdogd_inject.c \
             -framework IOKit -framework CoreFoundation
 
-          file build/libwwn_watchdogd_hook.dylib build/wwn-iowatchdog
+          # Claim daemon (holds exclusive after disable)
+          $CC -O2 -Wall -Wextra \
+            -o build/wwn-iowatchdog-claim \
+            src/claim/wwn-iowatchdog-claim.c \
+            -framework IOKit -framework CoreFoundation
+
+          file build/libwwn_watchdogd_hook.dylib build/wwn-iowatchdog \
+            build/wwn-iowatchdog-claim
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
-          mkdir -p $out/bin $out/lib
+          mkdir -p $out/bin $out/lib $out/share/wwn-iowatchdog
           install -m755 build/wwn-iowatchdog $out/bin/wwn-iowatchdog
+          install -m755 build/wwn-iowatchdog-claim $out/bin/wwn-iowatchdog-claim
           install -m755 build/libwwn_watchdogd_hook.dylib \
             $out/lib/libwwn_watchdogd_hook.dylib
+          install -m644 entitlements/wwn-iowatchdog.entitlements.plist \
+            $out/share/wwn-iowatchdog/wwn-iowatchdog.entitlements.plist
           runHook postInstall
         '';
+        # Sign after strip. Host /usr/bin/codesign (sandbox PATH has none).
+        # Ad-hoc forge of com.apple.private.iowatchdog.user-access: SIP-off
+        # lab only. Apple will not grant this for Developer ID.
+        postFixup = ''
+          ENT=$out/share/wwn-iowatchdog/wwn-iowatchdog.entitlements.plist
+          /usr/bin/codesign --force -s - --entitlements "$ENT" \
+            $out/bin/wwn-iowatchdog \
+            $out/bin/wwn-iowatchdog-claim \
+            $out/lib/libwwn_watchdogd_hook.dylib
+        '';
         meta = with pkgs.lib; {
-          description = "IOWatchdog Mode B tools (arm64e hook + fail-closed CLI on macOS 26)";
+          description = "IOWatchdog Mode B tools (Path A/B dual-path; fail-closed live inject on macOS 26)";
           platforms = platforms.darwin;
           license = licenses.mit;
         };

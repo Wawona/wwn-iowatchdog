@@ -10,12 +10,20 @@ artifacts.
 
 | Artifact | Purpose |
 |----------|---------|
-| `bin/wwn-iowatchdog` | `status` / `disable` / `enable` / `inject` |
-| `lib/libwwn_watchdogd_hook.dylib` | arm64e hook for a future soft-inject path |
+| `bin/wwn-iowatchdog` | `status` / `disable` / `enable` / `claim-install` / `claim-uninstall` / `inject-launchd` |
+| `bin/wwn-iowatchdog-claim` | Opt-in daemon: open type=1, disable, hold exclusive |
+| `lib/libwwn_watchdogd_hook.dylib` | arm64e Path B hook (Unix socket) |
 
-On macOS 26 (25F80), `disable`/`enable`/`inject` are **fail closed**: see
-[docs/macos26-iowatchdog-wall.md](docs/macos26-iowatchdog-wall.md).
-`status` can still locate the live `IOWatchdogUserClient` port name.
+### Dual path (0.3.0)
+
+1. **Path A:** entitled direct `IOServiceOpen(IOWatchdog, type=1)` + selector
+   3/4. Wins only when the client is free; use **claim** LaunchDaemon to win
+   the boot race against `watchdogd`.
+2. **Path B:** Unix socket to the hook inside `watchdogd` when loaded.
+3. Live soft-inject (`thread_set_state` / GOT) stays **fail closed** on
+   macOS 26 / 25F80. See [docs/macos26-iowatchdog-wall.md](docs/macos26-iowatchdog-wall.md).
+
+Wawona Take Over stays `blocked-no-iowatchdog` until proof gates pass.
 
 ## Layer (repo DAG)
 
@@ -34,7 +42,9 @@ Mode B only. See Wawona `docs/wwn-repo-dag.md`.
 ```bash
 nix build .#wwn-iowatchdog
 sudo ./result/bin/wwn-iowatchdog status
-# disable / enable currently fail closed on macOS 26 (see docs).
+# Opt-in claim (reboot to race watchdogd):
+# sudo ./result/bin/wwn-iowatchdog claim-install
+# sudo launchctl bootstrap system /Library/LaunchDaemons/com.aspauldingcode.wwn-iowatchdog-claim.plist
 ```
 
 ## License

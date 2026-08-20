@@ -67,10 +67,12 @@ fail closed. Wawona stays `WWN_MODEB_WD=blocked-no-iowatchdog`.
 
 Do not bootout `com.apple.watchdogd` without a successful disable ACK.
 
-## Possible future paths (not implemented)
+## Possible future paths
 
-- Third-party-unavailable platform inject entitlements.
-- New written plan only; no ad-hoc inject on the daily driver.
+- Prove Path A claim across reboot (60s hold).
+- Prove Path B sock after a non-lldb hook load.
+- Then a separate plan for Wawona Take Over flip.
+- Do not re-run `thread_set_state` / lldb on the daily driver.
 
 ## CoreBedtime research (2026-08-20, KEEP_WS only)
 
@@ -91,7 +93,52 @@ Conclusion: CoreBedtime’s **inject/present** model still works under KEEP_WS o
 not safer than Wawona’s blocked Take Over on this OS. Does not unblock
 Phase 1.
 
+## GhidraVibe RE (2026-08-20)
+
+Headless Ghidra 12.1 on this machine hit **Java 21 Zulu SIGBUS**
+(`BUS_ADRALN` in CodeHeap) even after freeing RAM. MS OpenJDK 11 runs;
+Ghidra 12 wants 21. Cursor `~/.cursor/mcp.json` is **home-manager managed**
+and still pointed at missing `GhidraMCP_Vibe_RSE`. Bridges are built at
+`~/GhidraVibe/result-ghidra-vibe-fresh/share/ghidra-mcp/`; rewrite HM MCP
+entries to those absolute uv bridges when HM is next switched. RE below is
+from **llvm-objdump / strings** on thin arm64e slices under `/tmp/wwn-re/`.
+
+| Target | Finding |
+|--------|---------|
+| `AppleARMWatchdogTimer.kext` | Bundle on disk has **no** `Contents/MacOS` executable (KC-resident only). No userspace seize API visible without KC extract. |
+| `/usr/libexec/watchdogd` | `IOServiceOpen(IOWatchdog, type=1)`. Selectors on 25F80: CheckEnabled=0, **Checkin=1**, DisableUserspaceMonitoring=3, Reenable=4, CheckUserspaceDefanged=5. Holds exclusive client for life of process. |
+| `/usr/libexec/sysstatuscheck` | Same open type=1; Checkin sel=1. No disable path. Confirms exclusive + entitlement class. |
+| `/usr/libexec/mobile_obliterator` | **No** `IOWatchdog` / `DisableUserspace` strings on this 25F80 build (earlier research applied to other OS/images). Do not invoke as a helper. |
+| WindowServer / SkyLight / loginwindow | No direct `IOWatchdog` user client open found. Userspace monitoring is **watchdogd** polling service checkins; unloading WS without sel=3 still yields the ~120s userspace-watchdog panic class. |
+
+### Answers to plan questions
+
+1. **Exclusive policy:** type=1 is single-client. Live open while watchdogd holds returns `0xe00002c5`. No second-client / seize found in userspace RE. Default: **claim-hold**.
+2. **Disable sticky?** Unproven without kext. Claim daemon re-enables on exit before close.
+3. **Entitlement:** `com.apple.private.iowatchdog.user-access` required for open (forged ad-hoc under SIP-off + AMFI-relaxed works; does not beat exclusive).
+4. **Obliterator:** not present as IOWatchdog helper on this build.
+5. **WindowServer checkin:** via watchdogd service monitoring, not a direct IOWatchdog open in WS. Classic unload still requires disable ACK first.
+
+## Dual-path (0.3.0)
+
+| Path | Mechanism | When it works |
+|------|-----------|---------------|
+| **A direct** | Entitled `IOServiceOpen` type=1 + sel 3/4 | Client free (no watchdogd hold) |
+| **A claim** | Opt-in LaunchDaemon `wwn-iowatchdog-claim` opens, disables, **holds** | Boot race before watchdogd |
+| **B sock** | Unix socket to `libwwn_watchdogd_hook.dylib` in watchdogd | Hook loaded; live soft-inject still fail-closed |
+| Live soft-inject | `thread_set_state` / GOT | **Blocked** (Phase 1.4) |
+
+CLI: `disable`/`enable` try A then B. `status` reports pathA/sock/marker/claim.
+`inject-launchd` only with disable marker. **Wawona Take Over stays
+`blocked-no-iowatchdog` until proof gates.**
+
+### Proof gates (not yet run)
+
+1. Path A stable 60s with claim held (reboot after `claim-install`).
+2. Path B sock round-trip 60s after hook is actually loaded.
+3. Separate plan before flipping Settings Take Over.
+
 ## Hook dylib
 
-`libwwn_watchdogd_hook.dylib` (arm64e) remains packaged for a future
-inject primitive. It must not be loaded via lldb.
+`libwwn_watchdogd_hook.dylib` (arm64e) is Path B. Load only after disable
+ACK (claim) via a future boot-time path; never via lldb.
