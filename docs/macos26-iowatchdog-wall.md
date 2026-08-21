@@ -24,8 +24,8 @@ Interactive sticky **proven** 2026-08-20 (`ok path=a sticky=1`, marker
 | Path A `OS_REASON_CODESIGNING` / 137 | AMFI rejects ad-hoc forged `com.apple.private.iowatchdog.user-access` | **0.3.8:** `--path-a` + `--path-a-amfi-nvram`; refuse arm without AMFI unless `WWN_IOW_PATHA_FORCE=1` |
 
 **Lab sticky (Path B, sole + reboot):** replacee auto-disable ACK.
-**Lab sticky (Path A, AMFI + outCnt=0):** interactive ACK proven; reboot
-staging fixed in 0.3.9.
+**Lab sticky (Path A, AMFI + outCnt=0):** interactive + **reboot RunAtLoad**
+ACK proven (`ok path=a sticky=1`, `path-a-sticky`).
 
 IOWatchdog kext RE unchanged (Checkin=1, Disable=3, sticky `+0xa8`).
 
@@ -81,7 +81,7 @@ the Path B ACK (separate change).
 |------|--------|
 | Path B reboot sticky | **PASS** (see [`path-a-path-b.md`](path-a-path-b.md)) |
 | Path A claim (no AMFI) | **FAIL** (codesigning / 137) |
-| Path A claim (`amfi_get_out_of_my_way=1`) | **PASS** interactive sticky (0.3.9 `outCnt=0`) |
+| Path A claim (`amfi_get_out_of_my_way=1`) | **PASS** interactive + reboot sticky (0.3.9) |
 | Soft-inject / `thread_set_state` | **FAIL closed** |
 | Phase 3 Settings Take Over | Product gate still separate |
 | Operator how-to | [`path-a-path-b.md`](path-a-path-b.md) |

@@ -23,7 +23,7 @@ Apple's `watchdogd` back; userspace monitoring stays off until Reenable
 | Artifact | `libwwn_watchdogd_hook.dylib` (arm64e) + LaunchDaemon wrapper | `wwn-iowatchdog-claim` (ad-hoc `com.apple.private.iowatchdog.user-access`) |
 | Installer | `claim-install --path-b` | `claim-install --path-a` |
 | Extra boot-arg | None beyond lab SIP-off / `-arm64e_preview_abi` | **`amfi_get_out_of_my_way=1`** required |
-| 25F80 status | **Reboot sticky proven** (0.3.7+) | **Interactive sticky proven** (0.3.9); reboot RunAtLoad staged |
+| 25F80 status | **Reboot sticky proven** (0.3.7+) | **Reboot sticky proven** (0.3.9; AMFI + `outCnt=0`) |
 | `pkg` arg | package root or `…/bin` | package root or `…/bin` |
 
 Soft-inject / `thread_set_state` / lldb into live `watchdogd` stay

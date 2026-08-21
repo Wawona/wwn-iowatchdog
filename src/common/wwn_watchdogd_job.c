@@ -50,6 +50,10 @@ int wwn_watchdogd_job_kickstart(void) {
 
 int wwn_watchdogd_job_restore(void) {
   int e = wwn_watchdogd_job_enable();
+  /* After persist-disable, the job may be absent from the domain. */
+  (void)run_cmd("/bin/launchctl bootstrap system "
+                "/System/Library/LaunchDaemons/com.apple.watchdogd.plist "
+                "2>/dev/null");
   int k = wwn_watchdogd_job_kickstart();
   return (e != 0) ? e : k;
 }
