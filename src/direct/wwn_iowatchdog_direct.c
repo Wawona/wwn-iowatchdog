@@ -57,7 +57,9 @@ int wwn_direct_scalar(uint32_t selector) {
       return 1;
     return -1;
   }
-  kr = IOConnectCallScalarMethod(conn, selector, NULL, 0, NULL, NULL);
+  uint64_t out[8];
+  uint32_t outCnt = 8;
+  kr = IOConnectCallScalarMethod(conn, selector, NULL, 0, out, &outCnt);
   if (kr != KERN_SUCCESS) {
     fprintf(stderr,
             "wwn-iowatchdog: Path A: IOConnectCallScalarMethod sel=%u: %s "

@@ -12,7 +12,7 @@
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.3.7";
+        version = "0.3.8";
         src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
         # Hook MUST be arm64e (watchdogd is arm64e). CLI/claim are host arm64.
@@ -71,6 +71,8 @@
           install -m755 scripts/claim-arm.sh $out/bin/wwn-iowatchdog-claim-arm
           install -m755 scripts/claim-disarm.sh \
             $out/bin/wwn-iowatchdog-claim-disarm
+          install -m755 scripts/patha-amfi-nvram.sh \
+            $out/bin/wwn-iowatchdog-patha-amfi-nvram
           runHook postInstall
         '';
         # Sign after strip. Host /usr/bin/codesign (sandbox PATH has none).
@@ -87,10 +89,11 @@
             $out/bin/wwn-iowatchdog-claim
           /usr/bin/codesign --force -s - \
             $out/lib/libwwn_watchdogd_hook.dylib \
-            $out/bin/wwn-iowatchdog-claim-install
+            $out/bin/wwn-iowatchdog-claim-install \
+            $out/bin/wwn-iowatchdog-patha-amfi-nvram
         '';
         meta = with pkgs.lib; {
-          description = "IOWatchdog Mode B tools (Path A/B dual-path; fail-closed live inject on macOS 26)";
+          description = "IOWatchdog Mode B tools (Path A entitled claim + Path B interpose; fail-closed soft-inject)";
           platforms = platforms.darwin;
           license = licenses.mit;
         };
@@ -115,6 +118,14 @@
         wwn-iowatchdog = {
           type = "app";
           program = "${self.packages.${system}.wwn-iowatchdog}/bin/wwn-iowatchdog";
+        };
+        claim-install = {
+          type = "app";
+          program = "${self.packages.${system}.wwn-iowatchdog}/bin/wwn-iowatchdog-claim-install";
+        };
+        wwn-iowatchdog-claim-install = {
+          type = "app";
+          program = "${self.packages.${system}.wwn-iowatchdog}/bin/wwn-iowatchdog-claim-install";
         };
       });
 

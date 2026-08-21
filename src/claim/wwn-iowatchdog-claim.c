@@ -1,10 +1,14 @@
 /*
- * Opt-in claim helper: open IOWatchdog type=1, DisableUserspaceMonitoring.
+ * Opt-in Path A claim: open IOWatchdog type=1 with
+ * com.apple.private.iowatchdog.user-access, DisableUserspaceMonitoring.
  *
  * Boot automation (25F80): claim-install persist-disables com.apple.watchdogd
  * so this binary wins exclusive open at RunAtLoad. After sticky disable it
  * restores Apple's job (enable + kickstart without -k). A restore LaunchDaemon
  * is a safety net if this process dies mid-flight.
+ *
+ * AMFI: ad-hoc private entitlement needs amfi_get_out_of_my_way=1 or the
+ * process dies OS_REASON_CODESIGNING / SIGKILL 137 before main().
  *
  * Default: sticky-release (disable, close, exit). --hold keeps exclusive.
  */
@@ -19,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -27,6 +32,17 @@ static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) {
   (void)sig;
   g_stop = 1;
+}
+
+static int bootargs_has_amfi_relaxed(void) {
+  char buf[1024];
+  size_t len = sizeof(buf);
+  if (sysctlbyname("kern.bootargs", buf, &len, NULL, 0) != 0)
+    return 0;
+  if (len >= sizeof(buf))
+    len = sizeof(buf) - 1;
+  buf[len] = '\0';
+  return strstr(buf, "amfi_get_out_of_my_way=1") != NULL;
 }
 
 static void restore_apple_watchdogd(const char *why) {
@@ -41,11 +57,19 @@ static void restore_apple_watchdogd(const char *why) {
 }
 
 static void write_ok_stamp(void) {
-  char buf[128];
+  char buf[160];
   time_t now = time(NULL);
-  snprintf(buf, sizeof(buf), "ok time=%ld sticky=1\n", (long)now);
+  snprintf(buf, sizeof(buf), "ok path=a sticky=1 time=%ld\n", (long)now);
   (void)wwn_iow_db_mkdir();
   (void)wwn_iow_write_file(WWN_IOW_CLAIM_OK_STAMP, buf);
+}
+
+static kern_return_t call_disable(io_connect_t conn) {
+  uint64_t out[8];
+  uint32_t outCnt = 8;
+  return IOConnectCallScalarMethod(
+      conn, kIOWatchdogDaemonDisableUserspaceMonitoring, NULL, 0, out,
+      &outCnt);
 }
 
 int main(int argc, char **argv) {
@@ -56,6 +80,8 @@ int main(int argc, char **argv) {
     else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       fprintf(stderr,
               "usage: wwn-iowatchdog-claim [--hold]\n"
+              "  Path A: entitled IOServiceOpen(type=1) + Disable (sel 3).\n"
+              "  Needs amfi_get_out_of_my_way=1 for ad-hoc private entitlement.\n"
               "  default: disable, close, restore watchdogd (sticky)\n"
               "  --hold: keep exclusive until SIGTERM, then restore\n");
       return 0;
@@ -67,11 +93,21 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  if (!bootargs_has_amfi_relaxed()) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim: WARNING: kern.bootargs lacks "
+            "amfi_get_out_of_my_way=1.\n"
+            "  Ad-hoc com.apple.private.iowatchdog.user-access usually dies "
+            "with OS_REASON_CODESIGNING / 137 before this message.\n"
+            "  Set via: sudo wwn-iowatchdog-claim-install --path-a-amfi-nvram\n"
+            "  then reboot. Prefer Path B if AMFI must stay on.\n");
+  }
+
   signal(SIGTERM, on_signal);
   signal(SIGINT, on_signal);
 
   (void)wwn_iow_db_mkdir();
-  (void)wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "1\n");
+  (void)wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "path-a\n");
 
   io_service_t svc = IOServiceGetMatchingService(
       kIOMainPortDefault, IOServiceMatching(WWN_IOW_SERVICE_NAME));
@@ -91,11 +127,10 @@ int main(int argc, char **argv) {
     return 3;
   }
 
-  kr = IOConnectCallScalarMethod(
-      conn, kIOWatchdogDaemonDisableUserspaceMonitoring, NULL, 0, NULL, NULL);
+  kr = call_disable(conn);
   if (kr != KERN_SUCCESS) {
-    fprintf(stderr, "wwn-iowatchdog-claim: DisableUserspaceMonitoring: %s "
-                    "(0x%x)\n",
+    fprintf(stderr,
+            "wwn-iowatchdog-claim: DisableUserspaceMonitoring: %s (0x%x)\n",
             mach_error_string(kr), (unsigned)kr);
     IOServiceClose(conn);
     restore_apple_watchdogd("disable-failed");
@@ -105,12 +140,12 @@ int main(int argc, char **argv) {
   mkdir("/tmp/libwayland-support", 0755);
   FILE *mf = fopen(WWN_IOW_DISABLED_MARKER, "w");
   if (mf) {
-    fputs(hold ? "claim-hold\n" : "claim-sticky\n", mf);
+    fputs(hold ? "path-a-hold\n" : "path-a-sticky\n", mf);
     fclose(mf);
   }
   FILE *cf = fopen(WWN_IOW_CLAIM_MARKER, "w");
   if (cf) {
-    fprintf(cf, "pid=%d mode=%s\n", (int)getpid(),
+    fprintf(cf, "pid=%d mode=%s path=a\n", (int)getpid(),
             hold ? "hold" : "sticky-release");
     fclose(cf);
   }
@@ -119,16 +154,15 @@ int main(int argc, char **argv) {
   if (!hold) {
     IOServiceClose(conn);
     fprintf(stderr,
-            "wwn-iowatchdog-claim: disable ACK; closed exclusive "
+            "wwn-iowatchdog-claim: Path A disable ACK; closed exclusive "
             "(sticky-after-close). pid=%d\n",
             (int)getpid());
-    /* Sticky ACK held: safe to bring Apple's watchdogd back. */
     restore_apple_watchdogd("sticky-ok");
     return 0;
   }
 
   fprintf(stderr,
-          "wwn-iowatchdog-claim: holding exclusive IOWatchdog (disable ACK). "
+          "wwn-iowatchdog-claim: holding exclusive IOWatchdog (Path A). "
           "pid=%d\n",
           (int)getpid());
 

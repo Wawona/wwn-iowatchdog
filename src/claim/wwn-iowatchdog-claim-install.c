@@ -6,7 +6,9 @@
  * talks to launchctl. Sign without com.apple.private.iowatchdog.user-access.
  *
  * usage:
- *   wwn-iowatchdog-claim-install [path-to-claim-binary-or-package-bin-dir]
+ *   wwn-iowatchdog-claim-install --path-a [pkg]
+ *   wwn-iowatchdog-claim-install --path-b [pkg]
+ *   wwn-iowatchdog-claim-install --path-a-amfi-nvram
  *   wwn-iowatchdog-claim-install --uninstall
  */
 #include "../common/wwn_iowatchdog.h"
@@ -18,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -184,6 +187,55 @@ static int resolve_sources(const char *arg, char *claim_src, size_t claim_sz,
   return 0;
 }
 
+static int bootargs_has_amfi_relaxed(void) {
+  char buf[1024];
+  size_t len = sizeof(buf);
+  if (sysctlbyname("kern.bootargs", buf, &len, NULL, 0) != 0)
+    return 0;
+  if (len >= sizeof(buf))
+    len = sizeof(buf) - 1;
+  buf[len] = '\0';
+  return strstr(buf, "amfi_get_out_of_my_way=1") != NULL;
+}
+
+static int do_patha_amfi_nvram(void) {
+  if (geteuid() != 0) {
+    fprintf(stderr, "wwn-iowatchdog-claim-install: --path-a-amfi-nvram needs root\n");
+    return 1;
+  }
+  if (bootargs_has_amfi_relaxed()) {
+    fprintf(stderr, "wwn-iowatchdog-claim-install: amfi_get_out_of_my_way=1 already set\n");
+    return 0;
+  }
+  char cur[1024];
+  size_t len = sizeof(cur);
+  if (sysctlbyname("kern.bootargs", cur, &len, NULL, 0) != 0)
+    cur[0] = '\0';
+  else {
+    if (len >= sizeof(cur))
+      len = sizeof(cur) - 1;
+    cur[len] = '\0';
+  }
+  char cmd[1536];
+  if (cur[0])
+    snprintf(cmd, sizeof(cmd),
+             "/usr/sbin/nvram 'boot-args=%s amfi_get_out_of_my_way=1'", cur);
+  else
+    snprintf(cmd, sizeof(cmd),
+             "/usr/sbin/nvram 'boot-args=amfi_get_out_of_my_way=1'");
+  int st = system(cmd);
+  if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+    fprintf(stderr, "wwn-iowatchdog-claim-install: nvram failed\n");
+    return 2;
+  }
+  fprintf(stderr,
+          "wwn-iowatchdog-claim-install: nvram updated. Reboot, then:\n"
+          "  sudo wwn-iowatchdog-claim-install --path-a /path/to/pkg\n"
+          "Revert: sudo nvram 'boot-args=%s'\n",
+          cur[0] ? cur : "");
+  return 0;
+}
+
 static int do_install(const char *arg) {
   char claim_src[512];
   char cli_src[512];
@@ -192,15 +244,24 @@ static int do_install(const char *arg) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: needs root\n");
     return 1;
   }
-  /* 25F80: adhoc forged entitlement → OS_REASON_CODESIGNING. Refuse default. */
+  /* 25F80: adhoc forged entitlement → OS_REASON_CODESIGNING without AMFI off. */
   if (getenv("WWN_IOW_PATHA_EXPERIMENT") == NULL) {
     fprintf(stderr,
-            "wwn-iowatchdog-claim-install: Path A claim refused on 25F80 "
-            "(AMFI codesigning; see docs/macos26-iowatchdog-wall.md).\n"
-            "  Named lab only: WWN_IOW_PATHA_EXPERIMENT=1 sudo … "
-            "[claim-bin]\n"
-            "  Path B insert also blocked (needs WWN_IOW_PATHB_EXPERIMENT=1).\n");
+            "wwn-iowatchdog-claim-install: Path A refused without opt-in.\n"
+            "  Use: sudo wwn-iowatchdog-claim-install --path-a [pkg]\n"
+            "  Or:  WWN_IOW_PATHA_EXPERIMENT=1 sudo … [pkg]\n"
+            "  Needs amfi_get_out_of_my_way=1 (see --path-a-amfi-nvram).\n"
+            "  Prefer Path B (proven sticky): --path-b\n");
     return 20;
+  }
+  if (!bootargs_has_amfi_relaxed() &&
+      getenv("WWN_IOW_PATHA_FORCE") == NULL) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: Path A needs "
+            "amfi_get_out_of_my_way=1 in kern.bootargs.\n"
+            "  sudo wwn-iowatchdog-claim-install --path-a-amfi-nvram && reboot\n"
+            "  Or force (expect 137): WWN_IOW_PATHA_FORCE=1 … --path-a\n");
+    return 21;
   }
   if (resolve_sources(arg, claim_src, sizeof(claim_src), cli_src,
                       sizeof(cli_src)) != 0)
@@ -230,7 +291,7 @@ static int do_install(const char *arg) {
     return 5;
   }
   wwn_iow_unlink_quiet(WWN_IOW_CLAIM_OK_STAMP);
-  if (wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "armed\n") != 0) {
+  if (wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "path-a-armed\n") != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: cannot write claim-pending\n");
     return 6;
   }
@@ -240,6 +301,10 @@ static int do_install(const char *arg) {
   if (write_restore_plist() != 0)
     return 8;
 
+  /* Path A and Path B are mutually exclusive holders. */
+  launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-pathb");
+  unlink(WWN_PATHB_PLIST);
+
   if (wwn_watchdogd_job_disable() != 0) {
     fprintf(stderr,
             "wwn-iowatchdog-claim-install: WARNING: launchctl disable "
@@ -248,7 +313,6 @@ static int do_install(const char *arg) {
 
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-claim");
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-restore");
-  launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-pathb");
   if (launchctl_bootstrap(WWN_CLAIM_PLIST) != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: bootstrap claim failed\n");
     return 9;
@@ -260,12 +324,13 @@ static int do_install(const char *arg) {
 
   fprintf(stderr,
           "wwn-iowatchdog-claim-install: Path A claim armed.\n"
-          "  NOTE: ad-hoc private entitlement often dies with "
-          "OS_REASON_CODESIGNING without amfi_get_out_of_my_way=1.\n"
-          "  Prefer: sudo wwn-iowatchdog-claim-install --path-b\n"
-          "  Durable binaries: %s\n"
-          "  Reboot after arm. Abort: --uninstall\n",
-          WWN_IOW_INSTALL_DIR);
+          "  Claim: %s (entitled iowatchdog.user-access)\n"
+          "  Apple watchdogd persist-disabled; claim runs at next boot.\n"
+          "  Reboot now. After login:\n"
+          "    cat /var/db/wwn-iowatchdog/claim-ok\n"
+          "    cat /tmp/libwayland-support/iowatchdog-userspace-disabled\n"
+          "  Abort: sudo wwn-iowatchdog-claim-install --uninstall\n",
+          WWN_IOW_INSTALLED_CLAIM);
   return 0;
 }
 
@@ -465,17 +530,25 @@ int main(int argc, char **argv) {
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 ||
                     strcmp(argv[1], "--help") == 0)) {
     fprintf(stderr,
-            "usage: wwn-iowatchdog-claim-install [--path-b] "
-            "[claim-bin|/path/to/bin|/path/to/pkg]\n"
+            "usage: wwn-iowatchdog-claim-install --path-a [pkg]\n"
+            "       wwn-iowatchdog-claim-install --path-b [pkg]\n"
+            "       wwn-iowatchdog-claim-install --path-a-amfi-nvram\n"
             "       wwn-iowatchdog-claim-install --uninstall\n"
-            "  --path-b: DYLD_INTERPOSE hook (0.3.7+; replacee, not dlsym)\n"
-            "  Path A claim: needs WWN_IOW_PATHA_EXPERIMENT=1 and usually\n"
-            "    amfi_get_out_of_my_way=1 (AMFI otherwise SIGKILL/codesign)\n");
+            "  --path-b: DYLD_INTERPOSE hook (0.3.7+; reboot sticky proven)\n"
+            "  --path-a: entitled claim daemon (needs amfi_get_out_of_my_way=1)\n"
+            "  --path-a-amfi-nvram: append that boot-arg (reboot after)\n"
+            "  pkg: nix result root or …/bin (default: next to this binary)\n");
     return 0;
   }
   if (argc >= 2 && strcmp(argv[1], "--uninstall") == 0)
     return do_uninstall();
+  if (argc >= 2 && strcmp(argv[1], "--path-a-amfi-nvram") == 0)
+    return do_patha_amfi_nvram();
   if (argc >= 2 && strcmp(argv[1], "--path-b") == 0)
     return do_install_pathb(argc >= 3 ? argv[2] : NULL);
+  if (argc >= 2 && strcmp(argv[1], "--path-a") == 0) {
+    setenv("WWN_IOW_PATHA_EXPERIMENT", "1", 1);
+    return do_install(argc >= 3 ? argv[2] : NULL);
+  }
   return do_install(argc >= 2 ? argv[1] : NULL);
 }
