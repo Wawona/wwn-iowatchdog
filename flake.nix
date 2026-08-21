@@ -12,7 +12,7 @@
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.3.12";
+        version = "0.3.13";
         src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
         # Hook MUST be arm64e (watchdogd is arm64e). CLI/claim are host arm64.
@@ -55,6 +55,7 @@
             src/claim/wwn-iowatchdog-claim.c \
             src/common/wwn_watchdogd_job.c \
             src/common/wwn_safety.c \
+            src/sock/wwn_iowatchdog_sock.c \
             -framework IOKit -framework CoreFoundation
 
           # Unentitled claim-install (no private entitlements: interactive OK)
@@ -62,7 +63,8 @@
             -o build/wwn-iowatchdog-claim-install \
             src/claim/wwn-iowatchdog-claim-install.c \
             src/common/wwn_watchdogd_job.c \
-            src/common/wwn_safety.c
+            src/common/wwn_safety.c \
+            src/sock/wwn_iowatchdog_sock.c
 
           file build/libwwn_watchdogd_hook.dylib build/wwn-iowatchdog \
             build/wwn-iowatchdog-claim build/wwn-iowatchdog-claim-install

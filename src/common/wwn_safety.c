@@ -424,7 +424,13 @@ int wwn_safety_doctor(void) {
   int claim_ok = (stat(WWN_IOW_CLAIM_OK_STAMP, &st) == 0);
   int pending = (stat(WWN_IOW_CLAIM_PENDING, &st) == 0);
   int claim_held = (stat(WWN_IOW_CLAIM_MARKER, &st) == 0);
-  int sock = (stat(WWN_IOW_SOCK_PATH, &st) == 0);
+  int sock = wwn_sock_present();
+  char sock_reply[128];
+  int sock_live = 0;
+  if (sock && wwn_sock_cmd("ping", sock_reply, sizeof(sock_reply)) == 0 &&
+      strncmp(sock_reply, "OK", 2) == 0)
+    sock_live = 1;
+
   int covfail = (stat(WWN_IOW_COVERAGE_FAIL, &st) == 0);
   int disabled_map = wwn_safety_apple_job_disabled();
   int path_a = wwn_safety_path_a_armed();
@@ -432,6 +438,17 @@ int wwn_safety_doctor(void) {
   int dual = wwn_safety_dual_path_armed();
   int succ = wwn_safety_reboot_successor_ok();
   int cov = wwn_coverage_ok();
+
+  int claim_ok_path_b = 0;
+  if (claim_ok) {
+    FILE *cf = fopen(WWN_IOW_CLAIM_OK_STAMP, "r");
+    if (cf) {
+      char line[128];
+      if (fgets(line, sizeof(line), cf) && strstr(line, "path=b") != NULL)
+        claim_ok_path_b = 1;
+      fclose(cf);
+    }
+  }
 
   int stale_held = 0;
   if (claim_held) {
@@ -448,6 +465,15 @@ int wwn_safety_doctor(void) {
     }
   }
 
+  /*
+   * Stale Path B (2026-08-20): claim-ok path=b + Path B plist, but Apple
+   * watchdogd re-enabled and sock dead. Second watchdogd SIGTRAPs; doctor
+   * used to say coverage_ok because any /usr/libexec/watchdogd counted.
+   */
+  int stale_path_b = 0;
+  if (claim_ok_path_b && path_b && !sock_live && !disabled_map)
+    stale_path_b = 1;
+
   printf("wwn-iowatchdog doctor\n");
   printf("  kern.bootargs: %s\n", boot);
   printf("  amfi_relaxed: %s\n", wwn_safety_amfi_relaxed() ? "yes" : "no");
@@ -458,10 +484,12 @@ int wwn_safety_doctor(void) {
   printf("  dual_path: %s\n", dual ? "YES (illegal)" : "no");
   printf("  reboot_successor_ok: %s\n", succ ? "yes" : "NO");
   printf("  claim-pending: %s\n", pending ? "yes" : "no");
-  printf("  claim-ok: %s\n", claim_ok ? "yes" : "no");
+  printf("  claim-ok: %s%s\n", claim_ok ? "yes" : "no",
+         claim_ok_path_b ? " (path=b)" : "");
   printf("  claim-held: %s%s\n", claim_held ? "yes" : "no",
          stale_held ? " (STALE pid)" : "");
-  printf("  pathb_sock: %s\n", sock ? "yes" : "no");
+  printf("  pathb_sock: %s%s\n", sock ? "yes" : "no",
+         sock ? (sock_live ? " (live)" : " (STALE inode)") : "");
   printf("  coverage-fail stamp: %s\n", covfail ? "yes" : "no");
   printf("  /usr/libexec/watchdogd pid: %s\n", pidbuf);
   printf("  coverage_ok: %s\n", cov ? "yes" : "NO");
@@ -481,6 +509,13 @@ int wwn_safety_doctor(void) {
   if (dual) {
     fprintf(stderr,
             "wwn-safety: doctor: FAIL dual Path A+B plists. Run --heal\n");
+    fail = 1;
+  }
+  if (stale_path_b) {
+    fprintf(stderr,
+            "wwn-safety: doctor: FAIL stale Path B "
+            "(claim-ok path=b, sock dead, Apple WD enabled). "
+            "Run --heal then --path-b and reboot before Classic\n");
     fail = 1;
   }
   if (stale_held) {
