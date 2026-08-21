@@ -83,7 +83,7 @@ the Path B ACK (separate change).
 | Path A claim (no AMFI) | **FAIL** (codesigning / 137) |
 | Path A claim (`amfi_get_out_of_my_way=1`) | **PASS** interactive + reboot sticky (0.3.9) |
 | Soft-inject / `thread_set_state` | **FAIL closed** |
-| Phase 3 Settings Take Over | **Product wired** (`iowatchdog-then-unload` + `claim-ok`); Classic E2E proof: [`Wawona/docs/desktop-replacement-classic-proof.md`](../../Wawona/docs/desktop-replacement-classic-proof.md) |
+| Phase 3 Settings Take Over | **HOLD** after 2026-08-20 evening panic: require live Disable (marker/sock `done=1`) + claim-ok; stage must not re-enable Apple while Path B armed. Incident: [`Wawona/docs/incident-reports/2026-08-20-stale-claim-ok-takeover/`](../../Wawona/docs/incident-reports/2026-08-20-stale-claim-ok-takeover/) |
 | Operator how-to | [`path-a-path-b.md`](path-a-path-b.md) |
 | Safety guards (coverage) | [`path-a-path-b.md`](path-a-path-b.md#safety-guards-0310) (`--doctor` / `--heal`) |
 

@@ -379,7 +379,13 @@ int wwn_safety_heal(void) {
   unlink(WWN_PATHB_PLIST);
   unlink(WWN_IOW_CLAIM_MARKER);
   wwn_iow_unlink_quiet(WWN_IOW_CLAIM_PENDING);
-  /* claim-ok kept as evidence */
+  /* Archive claim-ok: keeping the live stamp after heal lets product Take
+   * Over treat a stale file as sticky while plain Apple watchdogd is armed
+   * (2026-08-20 evening SIGTRAP panic). */
+  if (rename(WWN_IOW_CLAIM_OK_STAMP, WWN_IOW_CLAIM_OK_STAMP ".last") != 0)
+    wwn_iow_unlink_quiet(WWN_IOW_CLAIM_OK_STAMP);
+  wwn_iow_unlink_quiet(WWN_IOW_SOCK_PATH);
+  wwn_iow_unlink_quiet(WWN_IOW_DISABLED_MARKER);
   if (wwn_watchdogd_job_restore() != 0 ||
       wwn_safety_postflight("heal") != 0) {
     fprintf(stderr, "wwn-safety: heal HARD FAIL: still uncovered\n");
