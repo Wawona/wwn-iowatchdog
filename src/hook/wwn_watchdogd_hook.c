@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "../common/wwn_iowatchdog.h"
+#include "../common/wwn_watchdogd_job.h"
 
 typedef kern_return_t (*iocall_fn)(mach_port_t connection, uint32_t selector,
                                    const uint64_t *input,
@@ -158,8 +159,38 @@ static kern_return_t hooked_iocall(mach_port_t connection, uint32_t selector,
   }
   if (!g_orig_iocall)
     return kIOReturnError;
-  return g_orig_iocall(connection, selector, input, inputCnt, output,
-                       outputCnt);
+  kern_return_t kr = g_orig_iocall(connection, selector, input, inputCnt,
+                                   output, outputCnt);
+
+  /*
+   * Path B sticky: after first successful Checkin, DisableUserspaceMonitoring
+   * on the same connection (opt-in via WWN_IOW_AUTO_DISABLE=1). Fail soft.
+   */
+  static volatile int auto_done = 0;
+  if (kr == KERN_SUCCESS &&
+      selector == (uint32_t)kIOWatchdogDaemonCheckin && !auto_done &&
+      getenv("WWN_IOW_AUTO_DISABLE") != NULL) {
+    auto_done = 1;
+    kern_return_t dkr = g_orig_iocall(
+        connection, kIOWatchdogDaemonDisableUserspaceMonitoring, NULL, 0,
+        NULL, NULL);
+    if (dkr == KERN_SUCCESS) {
+      mkdir("/tmp/libwayland-support", 0755);
+      FILE *mf = fopen(WWN_IOW_DISABLED_MARKER, "w");
+      if (mf) {
+        fputs("path-b-auto\n", mf);
+        fclose(mf);
+      }
+      mkdir(WWN_IOW_DB_DIR, 0755);
+      FILE *ok = fopen(WWN_IOW_CLAIM_OK_STAMP, "w");
+      if (ok) {
+        fputs("ok path=b sticky=1\n", ok);
+        fclose(ok);
+      }
+      unlink(WWN_IOW_CLAIM_PENDING);
+    }
+  }
+  return kr;
 }
 
 static int call_on_conn(uint32_t selector, char *err, size_t errlen) {

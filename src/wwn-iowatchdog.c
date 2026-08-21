@@ -5,9 +5,14 @@
  * (Unix socket to arm64e hook in watchdogd). Live soft-inject stays
  * fail-closed on 25F80. Never lldb. Never kickstart -k watchdogd.
  *
+ * claim-install: persist-disable com.apple.watchdogd, install claim +
+ * restore LaunchDaemons, bootstrap both. Reboot once; claim wins open,
+ * sticky-disables, then restores Apple's job automatically.
+ *
  * Owned by github.com/Wawona/wwn-iowatchdog (L3'). Never ship on Apple mobile.
  */
 #include "common/wwn_iowatchdog.h"
+#include "common/wwn_watchdogd_job.h"
 
 #include <errno.h>
 #include <libproc.h>
@@ -16,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static void usage(const char *argv0) {
@@ -23,7 +29,9 @@ static void usage(const char *argv0) {
           "usage: %s status|disable|enable|inject|inject-launchd|"
           "claim-install|claim-uninstall\n"
           "  disable/enable: Path A (direct) then Path B (hook sock)\n"
-          "  claim-*: opt-in LaunchDaemon that holds exclusive after disable\n"
+          "  claim-install: arm one-boot claim (disables Apple watchdogd,\n"
+          "    installs claim+restore daemons). Reboot to prove sticky.\n"
+          "  claim-uninstall: remove daemons and re-enable Apple watchdogd\n"
           "  inject-launchd: only with disable marker present\n",
           argv0);
 }
@@ -67,7 +75,6 @@ static int try_disable_enable(uint32_t selector, const char *label,
     return 1;
   }
 
-  /* Path A */
   int a = wwn_direct_scalar(selector);
   if (a == 0) {
     printf("OK %s via Path A (direct)\n", label);
@@ -82,7 +89,6 @@ static int try_disable_enable(uint32_t selector, const char *label,
   else
     fprintf(stderr, "wwn-iowatchdog: Path A failed; trying Path B\n");
 
-  /* Path B */
   if (!wwn_sock_present()) {
     fprintf(stderr,
             "wwn-iowatchdog: Path B sock absent (%s). Install hook via "
@@ -109,6 +115,11 @@ static int try_disable_enable(uint32_t selector, const char *label,
   return 0;
 }
 
+static int file_exists(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0;
+}
+
 static int cmd_status(void) {
   if (geteuid() != 0) {
     fprintf(stderr, "wwn-iowatchdog: must run as root\n");
@@ -124,99 +135,59 @@ static int cmd_status(void) {
   const char *a_state =
       (probe == 0) ? "free" : (probe == 1) ? "exclusive" : "error";
   int sock = wwn_sock_present();
-  struct stat st;
-  int marker = (stat(WWN_IOW_DISABLED_MARKER, &st) == 0);
-  int claim = (stat(WWN_IOW_CLAIM_MARKER, &st) == 0);
+  int marker = file_exists(WWN_IOW_DISABLED_MARKER);
+  int claim = file_exists(WWN_IOW_CLAIM_MARKER);
+  int claim_ok = file_exists(WWN_IOW_CLAIM_OK_STAMP);
+  int pending = file_exists(WWN_IOW_CLAIM_PENDING);
 
   printf("watchdogd=%d IOWatchdogUserClient=%s0x%x pathA=%s sock=%s "
-         "marker=%s claim=%s\n",
+         "marker=%s claim=%s claim_ok=%s pending=%s\n",
          (int)pid, have_port ? "" : "none/", have_port ? (unsigned)port : 0u,
          a_state, sock ? "up" : "down", marker ? "yes" : "no",
-         claim ? "held" : "no");
-  printf("capability: Path A entitled open when free; claim sticky-release "
-         "(or --hold); Path B sock after hook load. No seize on 25F80; "
-         "disable sticky after close. Take Over stays blocked until proofs.\n");
+         claim ? "held" : "no", claim_ok ? "yes" : "no",
+         pending ? "yes" : "no");
+  printf("capability: Path A entitled open when free; claim-install arms "
+         "one-boot sticky claim (Apple watchdogd persist-disabled until "
+         "claim restores it). Path B sock after hook load. No seize on "
+         "25F80. Take Over stays blocked until proofs.\n");
   return 0;
 }
 
-static const char *claim_plist_path =
-    "/Library/LaunchDaemons/com.aspauldingcode.wwn-iowatchdog-claim.plist";
-
-static int claim_install(const char *claim_bin) {
-  if (geteuid() != 0) {
-    fprintf(stderr, "wwn-iowatchdog: claim-install needs root\n");
-    return 1;
-  }
+/*
+ * claim-install/uninstall live in unentitled wwn-iowatchdog-claim-install.
+ * This binary's private entitlements often SIGKILL interactive runs (137).
+ */
+static int exec_claim_helper(int uninstall, const char *extra) {
   char self[PROC_PIDPATHINFO_MAXSIZE];
-  char default_bin[512];
-  if (!claim_bin) {
-    if (proc_pidpath(getpid(), self, sizeof(self)) <= 0)
-      return 2;
-    char *slash = strrchr(self, '/');
-    if (!slash)
-      return 2;
-    *slash = '\0';
-    snprintf(default_bin, sizeof(default_bin), "%s/wwn-iowatchdog-claim", self);
-    claim_bin = default_bin;
+  char helper[PROC_PIDPATHINFO_MAXSIZE + 64];
+  if (proc_pidpath(getpid(), self, sizeof(self)) <= 0) {
+    fprintf(stderr, "wwn-iowatchdog: cannot resolve self path\n");
+    return 2;
   }
-  struct stat st;
-  if (stat(claim_bin, &st) != 0) {
-    fprintf(stderr, "wwn-iowatchdog: claim binary missing: %s\n", claim_bin);
+  char *slash = strrchr(self, '/');
+  if (!slash) {
+    fprintf(stderr, "wwn-iowatchdog: bad self path\n");
+    return 2;
+  }
+  *slash = '\0';
+  snprintf(helper, sizeof(helper), "%s/wwn-iowatchdog-claim-install", self);
+  if (access(helper, X_OK) != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog: missing unentitled helper:\n"
+            "  %s\n"
+            "Run: sudo wwn-iowatchdog-claim-install\n"
+            "  or: sudo wwn-iowatchdog-claim-install --uninstall\n",
+            helper);
     return 3;
   }
-  FILE *f = fopen(claim_plist_path, "w");
-  if (!f) {
-    fprintf(stderr, "wwn-iowatchdog: cannot write %s: %s\n", claim_plist_path,
-            strerror(errno));
-    return 4;
-  }
-  fprintf(f,
-          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-          "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-          "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-          "<plist version=\"1.0\">\n"
-          "<dict>\n"
-          "  <key>Label</key>\n"
-          "  <string>com.aspauldingcode.wwn-iowatchdog-claim</string>\n"
-          "  <key>ProgramArguments</key>\n"
-          "  <array>\n"
-          "    <string>%s</string>\n"
-          "  </array>\n"
-          "  <key>RunAtLoad</key>\n"
-          "  <true/>\n"
-          "  <key>KeepAlive</key>\n"
-          "  <false/>\n"
-          "  <key>UserName</key>\n"
-          "  <string>root</string>\n"
-          "  <key>StandardErrorPath</key>\n"
-          "  <string>/var/log/wwn-iowatchdog-claim.err.log</string>\n"
-          "  <key>StandardOutPath</key>\n"
-          "  <string>/var/log/wwn-iowatchdog-claim.out.log</string>\n"
-          "</dict>\n"
-          "</plist>\n",
-          claim_bin);
-  fclose(f);
-  fprintf(stderr,
-          "wwn-iowatchdog: wrote %s\n"
-          "  bootstrap: launchctl bootstrap system %s\n"
-          "  Reboot so claim can race watchdogd for exclusive open.\n"
-          "  Default claim is sticky-release (disable, close, exit).\n"
-          "  Do not kickstart -k watchdogd.\n",
-          claim_plist_path, claim_plist_path);
-  return 0;
-}
-
-static int claim_uninstall(void) {
-  if (geteuid() != 0) {
-    fprintf(stderr, "wwn-iowatchdog: claim-uninstall needs root\n");
-    return 1;
-  }
-  (void)system("launchctl bootout system/com.aspauldingcode.wwn-iowatchdog-claim "
-               "2>/dev/null");
-  unlink(claim_plist_path);
-  unlink(WWN_IOW_CLAIM_MARKER);
-  fprintf(stderr, "wwn-iowatchdog: claim LaunchDaemon removed\n");
-  return 0;
+  if (uninstall)
+    execl(helper, helper, "--uninstall", (char *)NULL);
+  else if (extra && extra[0])
+    execl(helper, helper, extra, (char *)NULL);
+  else
+    execl(helper, helper, (char *)NULL);
+  fprintf(stderr, "wwn-iowatchdog: exec %s: %s\n", helper, strerror(errno));
+  return 4;
 }
 
 int main(int argc, char **argv) {
@@ -238,9 +209,9 @@ int main(int argc, char **argv) {
   if (strcmp(cmd, "inject-launchd") == 0)
     return wwn_inject_launchd(argc >= 3 ? argv[2] : NULL);
   if (strcmp(cmd, "claim-install") == 0)
-    return claim_install(argc >= 3 ? argv[2] : NULL);
+    return exec_claim_helper(0, argc >= 3 ? argv[2] : NULL);
   if (strcmp(cmd, "claim-uninstall") == 0)
-    return claim_uninstall();
+    return exec_claim_helper(1, NULL);
   usage(argv[0]);
   return 2;
 }

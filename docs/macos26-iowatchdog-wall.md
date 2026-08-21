@@ -5,13 +5,28 @@ SIP fully disabled. Goal: call `DisableUserspaceMonitoring` (selector 3) on
 the live `IOWatchdogUserClient` held by `/usr/libexec/watchdogd` without
 lldb (lldb attach exits watchdogd with SIGTRAP and panics).
 
-## Verdict (Phase 1.4)
+## Verdict (Phase 1.4 + Phase 2 proofs, 2026-08-20 evening)
 
-**25F80 Classic blocked.** Boot-arg pass (`amfi_get_out_of_my_way=1` on top
-of `-arm64e_preview_abi`) did **not** yield a proven
-`DisableUserspaceMonitoring` path. Do not enable Settings Take Over. Do not
-ship KEEP_WS mute as Classic. `wwn-iowatchdog disable|enable|inject` stay
-fail closed. Wawona stays `WWN_MODEB_WD=blocked-no-iowatchdog`.
+**25F80 Classic blocked. No further safe avenue on this build without a
+new named experiment.**
+
+Phase 1.4: soft-inject / GOT / lldb fail-closed (see below).
+Phase 2 proofs (same day):
+
+| Gate | Result |
+|------|--------|
+| Path A claim reboot | **FAIL** `OS_REASON_CODESIGNING` (adhoc forged entitlement) |
+| Path B `DYLD_INSERT` reboot | **FAIL** SIGBUS 138 (7 successive crashes) |
+| Take Over | stays `WWN_MODEB_WD=blocked-no-iowatchdog` |
+
+IOWatchdog kext RE is complete (selectors, exclusive, sticky `+0xa8`).
+Remaining failures are **AMFI / arm64e load policy**, not missing kext
+semantics. Do not enable Settings Take Over. Do not re-arm Path A claim
+or Path B insert on the daily driver. Optional future: named
+`amfi_get_out_of_my_way=1` Path A-only experiment (separate plan).
+
+`wwn-iowatchdog disable|enable|inject` stay fail closed. Wawona stays
+`WWN_MODEB_WD=blocked-no-iowatchdog`.
 
 ## What works
 
@@ -60,17 +75,22 @@ fail closed. Wawona stays `WWN_MODEB_WD=blocked-no-iowatchdog`.
 
 | Gate | State |
 |------|--------|
-| Phase 1 disable ACK | **FAIL** (no working primitive) |
-| Phase 2 proofs (bootout / Classic smoke) | **ABORTED** (requires Phase 1 OK) |
+| Phase 1 disable ACK | **FAIL** (no working soft-inject primitive) |
+| Phase 2 Path A claim | **FAIL** (AMFI codesigning) |
+| Phase 2 Path B insert | **FAIL** (SIGBUS on DYLD_INSERT) |
+| Phase 2 Classic smoke | **ABORTED** |
 | Phase 3 Settings Take Over | **NOT FLIPPED** |
 | `WWN_MODEB_WD` | `blocked-no-iowatchdog` |
+| RE loop exit | **Hard wall** (no further safe avenue on 25F80) |
 
 Do not bootout `com.apple.watchdogd` without a successful disable ACK.
+Do not re-arm `claim-install` / `--path-b` on this host by default.
 
 ## Possible future paths
 
-- Prove Path A claim across reboot (sticky marker + 60s). Checklist in wall.
-- Prove Path B sock after a non-lldb hook load.
+- Named experiment only: `amfi_get_out_of_my_way=1` + Path A claim (not GOT /
+  `thread_set_state`). Revert boot-arg after.
+- New non-insert load idea for Path B (do not re-try ad-hoc `DYLD_INSERT`).
 - Then a separate plan for Wawona Take Over flip.
 - Do not re-run `thread_set_state` / lldb on the daily driver.
 - Java ≥17 HotSpot on 25F80 still SIGBUS; revisit for Ghidra headless.
@@ -94,15 +114,16 @@ Conclusion: CoreBedtime’s **inject/present** model still works under KEEP_WS o
 not safer than Wawona’s blocked Take Over on this OS. Does not unblock
 Phase 1.
 
-## GhidraVibe RE (2026-08-20, updated same day)
+## GhidraVibe RE (2026-08-20, updated evening)
 
 ### Toolchain
 
 | Item | Status |
 |------|--------|
-| Cursor MCP (`ghidra` / `ghidra-vibe` / `ghidra-vibe-rag`) | **Fixed** via nix-darwin `.dotfiles` → `~/GhidraVibe#ghidra-vibe` uv wrappers |
-| Headless Ghidra 12 (needs Java 21) | **Blocked on this host**: Zulu 21, Temurin 21, and Temurin 17 all SIGBUS in `CodeHeap::allocate` (`BUS_ADRALN`). MS OpenJDK 11 works. ~2 GiB free RAM; not a memory-pressure issue. Decompile via **ipsw + llvm-objdump** instead |
-| Project import / MCP decompile | Deferred until a working HotSpot ≥17 exists on 25F80 |
+| Cursor MCP stdio (`ghidra-mcp` / `ghidra-vibe-mcp` / `ghidra-vibe-rag-mcp`) | **Live** via nix `#ghidra-vibe-mcp` (same host model as mcp-nixos / wwn-mcp). No public URL. Vibe auto-starts mcp-ext (70 tools). |
+| Headless Ghidra analysis (`:8089`) | **Still blocked**: Zulu 21 SIGBUS in `CodeHeap::allocate`. MS OpenJDK 11 only other JVM. `list_instances` empty. |
+| Decompile path used | **ipsw + llvm-objdump** on `/tmp/wwn-re/kc/com.apple.driver.AppleARMWatchdogTimer`. Slices in `/tmp/wwn-re/kc/disasm/*.s`. |
+| Safety this session | Killed stray `lldb_mcp.py` before RE. Loop PID 28701 still armed. |
 
 ### Artifacts under `/tmp/wwn-re/`
 
@@ -118,19 +139,31 @@ Phase 1.
 | `mobile_obliterator` | No IOWatchdog strings on this 25F80 build |
 | WindowServer | No direct IOWatchdog open; watchdogd polls service checkins |
 
-### Kext (`IOWatchdog::newUserClient` / disable / close / checkWatchdog)
+### Kext instruction-level (25F80 `IOWatchdog`)
 
-1. **Exclusive / seize:** type must be `1`. Existing client pointer at object `+0x98` non-null → return `0xe00002c5` (exclusive). **No seize / second client.** Root privilege + `copyClientEntitlement(…, "com.apple.private.iowatchdog.user-access")` required (enforced in kext `newUserClient`).
-2. **Disable sticky?** **Yes.** `userspaceDisableUserspaceMonitoring` clears flag at `+0xa8` and timer state at `+0xb0`. `userClientClose` only stores null to `+0x98` (frees exclusive). Does **not** restore `+0xa8`. `userspaceCheckin` does **not** re-set `+0xa8`.
-3. **`checkWatchdog`:** `ldrb [obj,#0xa8]`; if clear, early-out (no userspace timeout panic path). So sticky disable survives client close and later watchdogd open/checkin.
-4. **Entitlement:** string `com.apple.private.iowatchdog.user-access` checked in-kext via `IOUserClient::copyClientEntitlement` after a `"root"` privilege check. AMFI still gates whether the entitlement is present on the task; forge works under SIP-off + AMFI-relaxed as previously verified.
-5. **Defang:** separate refcount path (`increaseDefangRefCount` / `toggleUserSpaceMonitoringWithReason`); not required for Classic disable.
+Evidence: `/tmp/wwn-re/kc/disasm/{newUserClient,userClientClose,userspaceDisable,userspaceCheckin,userspaceReenable,checkWatchdog}.s`.
+
+1. **Exclusive / seize (`newUserClient` @ `…48408`):** `cmp w24,#1`. Wrong type → `0xe00002c2`. Type 1 + `[obj+0x98]!=0` → **`0xe00002c5`**. No seize. Entitlement string `com.apple.private.iowatchdog.user-access` in kext; `"root"` then `copyClientEntitlement`. After open, if `+0xa8` bit0 clear, skips deadline arm (`+0xb0`/`+0xc8`): sticky is not undone by a later open.
+2. **Disable sticky (`userspaceDisable…` @ `…48868`):** `strb wzr,[obj,#0xa8]` then `stp q0,q0,[obj,#0xb0]`. Returns 0.
+3. **Close (`userClientClose` @ `…48614`):** only `str xzr,[obj,#0x98]`. Does not touch `+0xa8`.
+4. **Checkin (`userspaceCheckin` @ `…48788`):** writes `+0xab=1` / counters. Does **not** write `+0xa8`.
+5. **Reenable (`userspaceReenable…` @ `…488e4`):** sole `strb #1,[obj,#0xa8]` path.
+6. **`checkWatchdog` (@ `…481a8`):** `ldrb` `+0xa8` then `tbz` early-out before `shutdownCheckWatchdog`.
+7. **Defang:** separate; not required for Classic disable.
+
+### launchd note (Path B)
+
+`com.apple.watchdogd`: `KeepAlive.SuccessfulExit=false`;
+`_PanicOnCrash.PanicOnConsecutiveCrash=true`; IOKit-matched start of
+`/usr/libexec/watchdogd`. SIP fully disabled here. Hook constructor must
+not crash. Prefer boot-time `DYLD_INSERT` after sticky claim. Current
+`inject-launchd` is echo-only (records hook path; does not attach insert).
 
 ### Design consequence
 
-- Path A claim default is **sticky-release**: open → disable → close → exit (no Reenable). `KeepAlive` false.
+- Path A claim default is **sticky-release**: open → disable → close → exit (no Reenable).
 - `--hold` keeps exclusive until SIGTERM (still no Reenable on exit).
-- Path B still needs a non-lldb hook load into watchdogd for the Unix sock; sticky disable alone does not load the hook.
+- Path B needs a real non-lldb insert after **proven** p2 (see Path B design below).
 
 ## Dual-path (0.3.x)
 
@@ -143,25 +176,39 @@ Phase 1.
 
 ### Proof gates
 
-1. Path A claim across reboot (sticky marker + 60s, no panic) — **human-gated** (see checklist below).
-2. Path B sock round-trip 60s after non-lldb hook load — **open**.
-3. Wawona Take Over flip — **separate plan only**; stays `blocked-no-iowatchdog`.
+1. Path A claim across reboot — **FAIL** (race `0xe00002c5`, then
+   `OS_REASON_CODESIGNING` after automated claim-install).
+2. Path B `DYLD_INSERT` sticky — **FAIL** (SIGBUS 138 ×7). Manual insert
+   also 138. Disarmed; Apple `watchdogd` restored.
+3. Wawona Take Over flip — **NOT STARTED**; stays `blocked-no-iowatchdog`.
 
-### Claim reboot checklist (p1; do not auto-reboot)
+### Do not re-arm (default)
 
 ```text
-1. pgrep -lf lldb_mcp || echo lldb_mcp_gone   # must be gone
-2. nix build ./wwn-iowatchdog#wwn-iowatchdog
-3. sudo ./result/bin/wwn-iowatchdog claim-install
-4. sudo launchctl bootstrap system \
-     /Library/LaunchDaemons/com.aspauldingcode.wwn-iowatchdog-claim.plist
-5. Reboot (user-approved only)
-6. After login: sudo ./result/bin/wwn-iowatchdog status
-   Expect: marker=yes, pathA may be exclusive|free, claim file or sticky marker
-7. Hold 60s; confirm no panic; cat marker
-8. Optional: sudo ./result/bin/wwn-iowatchdog enable  # only when done testing
+# Refused unless WWN_IOW_PATHB_EXPERIMENT=1 (named lab only):
+#   sudo wwn-iowatchdog-claim-install --path-b
+# Path A claim similarly needs a named AMFI experiment; do not arm casually.
+# Abort / clean:
+#   sudo wwn-iowatchdog-claim-install --uninstall
+```
+
+### Path B load design (p3; after p2 only)
+
+Goal: get `libwwn_watchdogd_hook.dylib` into watchdogd **without** lldb /
+`thread_set_state` / GOT.
+
+```text
+A. Prove p2 sticky claim (marker held 60s, no panic).
+B. Implement inject that actually sets DYLD_INSERT_LIBRARIES for the next
+   watchdogd exec (SIP-off). Prefer a thin wrapper as ProgramArguments[0]
+   that exports insert then execs /usr/libexec/watchdogd. Do not use
+   kickstart -k. Do not rely on the current echo-only inject plist.
+C. Reboot once with claim + insert staged (single controlled restart).
+D. Confirm sock: ping / disable / enable round-trip ≥60s.
+E. Hook must never crash (PanicOnConsecutiveCrash=true).
 ```
 
 ## Hook dylib
 
-`libwwn_watchdogd_hook.dylib` (arm64e) is Path B. Load only after disable ACK via a future boot-time path; never via lldb.
+`libwwn_watchdogd_hook.dylib` (arm64e) is Path B. Load only after disable ACK
+via boot-time insert (above); never via lldb.

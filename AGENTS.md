@@ -3,24 +3,23 @@
 ## What this repo is
 
 L3′ **macOS Watchdog tools** for Wawona Desktop Mode B (Path A entitled
-open + claim-hold; Path B hook socket).
+open + claim; Path B hook socket). Lab scaffolding only on 25F80.
 
 ## Never
 
 - lldb / debugserver / Cursor `lldb_mcp` attach to `watchdogd`
 - unload / `kickstart -k` watchdogd without a successful disable ACK
-- claim disable works on macOS 26 without re-proving against
-  `docs/macos26-iowatchdog-wall.md`
+- re-arm Path A / Path B without `WWN_IOW_PATHA_EXPERIMENT` /
+  `WWN_IOW_PATHB_EXPERIMENT` (both **FAIL** on 25F80; see wall)
 - flip Wawona Settings Take Over from this repo alone
 - add this flake as an input of L0-L2
 - ship these binaries in App Store / Play / Apple-mobile artifacts
 
 ## macOS 26 wall
 
-**25F80 Classic blocked (Phase 1.4) for live soft-inject.** Dual-path
-scaffolding is in tree: Path A works when the client is free / claim wins
-boot; Path B needs the hook loaded. Take Over in Wawona stays
-`blocked-no-iowatchdog` until proof gates in the wall doc. Full table:
+**25F80 Classic hard wall (Phase 1.4 + Phase 2).** Soft-inject blocked.
+Path A claim FAIL (`OS_REASON_CODESIGNING`). Path B `DYLD_INSERT` FAIL
+(SIGBUS 138). Take Over stays `blocked-no-iowatchdog`. Full table:
 `docs/macos26-iowatchdog-wall.md`.
 
 ## DAG
