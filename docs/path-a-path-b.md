@@ -23,7 +23,8 @@ Apple's `watchdogd` back; userspace monitoring stays off until Reenable
 | Artifact | `libwwn_watchdogd_hook.dylib` (arm64e) + LaunchDaemon wrapper | `wwn-iowatchdog-claim` (ad-hoc `com.apple.private.iowatchdog.user-access`) |
 | Installer | `claim-install --path-b` | `claim-install --path-a` |
 | Extra boot-arg | None beyond lab SIP-off / `-arm64e_preview_abi` | **`amfi_get_out_of_my_way=1`** required |
-| 25F80 status | **Reboot sticky proven** (0.3.7+) | Implemented (0.3.8); reboot proof pending AMFI-on |
+| 25F80 status | **Reboot sticky proven** (0.3.7+) | **Interactive sticky proven** (0.3.9); reboot RunAtLoad staged |
+| `pkg` arg | package root or `…/bin` | package root or `…/bin` |
 
 Soft-inject / `thread_set_state` / lldb into live `watchdogd` stay
 **fail closed** (panic class). Never use them.
@@ -175,6 +176,8 @@ sudo nvram 'boot-args=-arm64e_preview_abi'
 
 - Boot race without persist-disable: Apple wins exclusive → claim open fails.
 - Interactive entitled CLI without AMFI → often dies before `main`.
+- Disable with `outputCnt > 0` → `0xe00002c2` on 25F80. Use `outCnt=0` and
+  `NULL` output (claim 0.3.9+).
 - Prefer Path B on the daily driver; Path A AMFI-off is lab-shaped.
 
 ## Safety (both paths)
@@ -211,3 +214,4 @@ wwn-iowatchdog status
 | 0.3.6 | Path B: drop fishhook; `DYLD_INTERPOSE` |
 | 0.3.7 | Path B: call interpose **replacee**; reboot sticky proven |
 | 0.3.8 | Path A: `--path-a`, `--path-a-amfi-nvram`, flake `claim-install` app |
+| 0.3.9 | Path A: Disable with `outCnt=0` (non-zero out → `0xe00002c2`); pkg root resolves `bin/` |

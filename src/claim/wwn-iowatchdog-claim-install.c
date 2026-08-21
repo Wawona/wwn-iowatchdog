@@ -155,8 +155,13 @@ static int resolve_sources(const char *arg, char *claim_src, size_t claim_sz,
       return -1;
     }
     if (S_ISDIR(st.st_mode)) {
+      /* Accept …/bin or package root (…/bin siblings). */
       snprintf(claim_src, claim_sz, "%s/wwn-iowatchdog-claim", arg);
       snprintf(cli_src, cli_sz, "%s/wwn-iowatchdog", arg);
+      if (stat(claim_src, &st) != 0) {
+        snprintf(claim_src, claim_sz, "%s/bin/wwn-iowatchdog-claim", arg);
+        snprintf(cli_src, cli_sz, "%s/bin/wwn-iowatchdog", arg);
+      }
     } else {
       /* Path to claim binary; CLI is sibling. */
       snprintf(claim_src, claim_sz, "%s", arg);
@@ -313,19 +318,15 @@ static int do_install(const char *arg) {
 
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-claim");
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-restore");
-  if (launchctl_bootstrap(WWN_CLAIM_PLIST) != 0) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: bootstrap claim failed\n");
-    return 9;
-  }
-  if (launchctl_bootstrap(WWN_RESTORE_PLIST) != 0) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: bootstrap restore failed\n");
-    return 10;
-  }
-
+  /*
+   * Stage plists only (like Path B). Bootstrapping claim+restore in this
+   * session races the restore helper (90s then re-enables Apple and clears
+   * pending). Claim RunAtLoad on the next reboot wins exclusive.
+   */
   fprintf(stderr,
           "wwn-iowatchdog-claim-install: Path A claim armed.\n"
           "  Claim: %s (entitled iowatchdog.user-access)\n"
-          "  Apple watchdogd persist-disabled; claim runs at next boot.\n"
+          "  Plists staged; Apple watchdogd persist-disabled.\n"
           "  Reboot now. After login:\n"
           "    cat /var/db/wwn-iowatchdog/claim-ok\n"
           "    cat /tmp/libwayland-support/iowatchdog-userspace-disabled\n"

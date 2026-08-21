@@ -11,10 +11,9 @@ lldb (lldb attach exits watchdogd with SIGTRAP and panics).
 `ok path=b sticky=1 replacee=1`, marker `path-b-auto`, sock
 `done=1 dkr=0x0`, pathb LaunchDaemon stable.
 
-**Path A:** implemented (`--path-a`, lean entitlement, scalar out buffers,
-AMFI preflight). Still requires `amfi_get_out_of_my_way=1`
-(`--path-a-amfi-nvram` + reboot) or claim dies `OS_REASON_CODESIGNING` / 137.
-Soft-inject / lldb stay fail-closed.
+**Path A:** `amfi_get_out_of_my_way=1` + Disable with **`outCnt=0`**.
+Interactive sticky **proven** 2026-08-20 (`ok path=a sticky=1`, marker
+`path-a-sticky`). Reboot RunAtLoad proof: stage plists only (0.3.9).
 
 ### Load-path RE (2026-08-20 late → 0.3.8)
 
@@ -25,7 +24,8 @@ Soft-inject / lldb stay fail-closed.
 | Path A `OS_REASON_CODESIGNING` / 137 | AMFI rejects ad-hoc forged `com.apple.private.iowatchdog.user-access` | **0.3.8:** `--path-a` + `--path-a-amfi-nvram`; refuse arm without AMFI unless `WWN_IOW_PATHA_FORCE=1` |
 
 **Lab sticky (Path B, sole + reboot):** replacee auto-disable ACK.
-**Lab sticky (Path A):** pending named reboot with AMFI relaxed.
+**Lab sticky (Path A, AMFI + outCnt=0):** interactive ACK proven; reboot
+staging fixed in 0.3.9.
 
 IOWatchdog kext RE unchanged (Checkin=1, Disable=3, sticky `+0xa8`).
 
@@ -81,7 +81,7 @@ the Path B ACK (separate change).
 |------|--------|
 | Path B reboot sticky | **PASS** (see [`path-a-path-b.md`](path-a-path-b.md)) |
 | Path A claim (no AMFI) | **FAIL** (codesigning / 137) |
-| Path A claim (`amfi_get_out_of_my_way=1`) | Implemented; reboot proof pending |
+| Path A claim (`amfi_get_out_of_my_way=1`) | **PASS** interactive sticky (0.3.9 `outCnt=0`) |
 | Soft-inject / `thread_set_state` | **FAIL closed** |
 | Phase 3 Settings Take Over | Product gate still separate |
 | Operator how-to | [`path-a-path-b.md`](path-a-path-b.md) |

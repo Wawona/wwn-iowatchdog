@@ -65,10 +65,10 @@ static void write_ok_stamp(void) {
 }
 
 static kern_return_t call_disable(io_connect_t conn) {
-  uint64_t out[8];
-  uint32_t outCnt = 8;
+  /* 25F80: non-zero outputCnt → 0xe00002c2; outCnt=0 + NULL out succeeds. */
+  uint32_t outCnt = 0;
   return IOConnectCallScalarMethod(
-      conn, kIOWatchdogDaemonDisableUserspaceMonitoring, NULL, 0, out,
+      conn, kIOWatchdogDaemonDisableUserspaceMonitoring, NULL, 0, NULL,
       &outCnt);
 }
 
