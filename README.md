@@ -2,41 +2,48 @@
 
 macOS **Watchdog** tools for Wawona Desktop / LockScreen Mode B.
 
-Home for privileged helpers that talk to kernel `IOWatchdog` / `watchdogd`.
-Not graphics. Not Swinging Bridge. Never ship on iOS or in App Store / Play
-artifacts.
+Talks to kernel `IOWatchdog` / `watchdogd`. Not graphics. Not Swinging
+Bridge. Never ship on iOS or in App Store / Play artifacts.
+
+## Path A vs Path B
+
+Full operator guide: **[`docs/path-a-path-b.md`](docs/path-a-path-b.md)**.
+
+| Path | What it does | 25F80 |
+|------|----------------|-------|
+| **B** (preferred) | `DYLD_INSERT` hook into Apple's `watchdogd`; Disable on its connection | Reboot sticky **proven** |
+| **A** | Entitled claim opens type=1, Disable, close (sticky) | Needs `amfi_get_out_of_my_way=1` |
+
+Investigation wall (failures, RE): [`docs/macos26-iowatchdog-wall.md`](docs/macos26-iowatchdog-wall.md).
+
+### Quick arm
+
+```bash
+nix build .#wwn-iowatchdog --out-link /tmp/wwn-iow
+
+# Path B (no AMFI boot-arg)
+sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --path-b /tmp/wwn-iow
+# reboot → cat /var/db/wwn-iowatchdog/claim-ok
+
+# Path A (lab AMFI-off)
+sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --path-a-amfi-nvram
+# reboot, then:
+sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --path-a /tmp/wwn-iow
+# reboot → cat /var/db/wwn-iowatchdog/claim-ok
+
+sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --uninstall
+```
+
+`nix run .#claim-install -- --help` works.
 
 ## Tools
 
 | Artifact | Purpose |
 |----------|---------|
-| `bin/wwn-iowatchdog` | `status` / `disable` / `enable` (Path A direct or Path B sock) |
-| `bin/wwn-iowatchdog-claim-install` | Unentitled `--path-a` / `--path-b` / `--uninstall` |
-| `bin/wwn-iowatchdog-claim` | Path A boot claim (entitled; needs AMFI relaxed) |
-| `lib/libwwn_watchdogd_hook.dylib` | arm64e Path B `DYLD_INTERPOSE` hook |
-
-### Dual path (0.3.8)
-
-1. **Path B (preferred on 25F80):** `DYLD_INSERT` + interpose **replacee**.
-   Reboot sticky **proven** (`claim-ok` / `dkr=0x0`).
-   ```bash
-   nix build .#wwn-iowatchdog --out-link /tmp/wwn-iow
-   sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --path-b /tmp/wwn-iow
-   # reboot, then cat /var/db/wwn-iowatchdog/claim-ok
-   ```
-2. **Path A:** entitled `IOServiceOpen` + sel 3. Needs
-   `amfi_get_out_of_my_way=1` or AMFI kills ad-hoc
-   `com.apple.private.iowatchdog.user-access` (`OS_REASON_CODESIGNING` / 137).
-   ```bash
-   sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --path-a-amfi-nvram
-   # reboot
-   sudo /tmp/wwn-iow/bin/wwn-iowatchdog-claim-install --path-a /tmp/wwn-iow
-   # reboot again for claim RunAtLoad
-   ```
-3. Live soft-inject stays **fail closed**. See
-   [docs/macos26-iowatchdog-wall.md](docs/macos26-iowatchdog-wall.md).
-
-`nix run .#claim-install -- --help` works (flake app).
+| `bin/wwn-iowatchdog` | `status` / `disable` / `enable` (direct or Path B sock) |
+| `bin/wwn-iowatchdog-claim-install` | `--path-a` / `--path-b` / `--path-a-amfi-nvram` / `--uninstall` |
+| `bin/wwn-iowatchdog-claim` | Path A boot claim (entitled) |
+| `lib/libwwn_watchdogd_hook.dylib` | arm64e Path B interpose hook |
 
 ## Layer (repo DAG)
 
@@ -48,15 +55,8 @@ Mode B only. See Wawona `docs/wwn-repo-dag.md`.
 1. **Never** lldb / debugserver / Cursor `lldb_mcp` on `watchdogd`.
 2. **Never** unload / `kickstart -k` `com.apple.watchdogd` without a
    successful disable ACK.
-3. Do not treat experimental inject as proven on 25F80.
+3. Soft-inject / `thread_set_state` stay fail closed on 25F80.
 4. Path A AMFI-off is lab-only; prefer Path B on the daily driver.
-
-## Build / run
-
-```bash
-nix build .#wwn-iowatchdog
-sudo ./result/bin/wwn-iowatchdog-claim-install --uninstall
-```
 
 ## License
 

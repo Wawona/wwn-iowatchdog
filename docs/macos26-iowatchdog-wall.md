@@ -75,27 +75,26 @@ the Path B ACK (separate change).
 - Prefer `kern.bootargs` without `amfi_get_out_of_my_way=1` unless a new
   named experiment needs it (revert is next-reboot).
 
-## Consequence
+## Consequence (updated 0.3.8)
 
 | Gate | State |
 |------|--------|
-| Phase 1 disable ACK | **FAIL** (no working soft-inject primitive) |
-| Phase 2 Path A claim | **FAIL** (AMFI codesigning) |
-| Phase 2 Path B insert | **FAIL** (SIGBUS on DYLD_INSERT) |
-| Phase 2 Classic smoke | **ABORTED** |
-| Phase 3 Settings Take Over | **NOT FLIPPED** |
-| `WWN_MODEB_WD` | `blocked-no-iowatchdog` |
-| RE loop exit | **Hard wall** (no further safe avenue on 25F80) |
+| Path B reboot sticky | **PASS** (see [`path-a-path-b.md`](path-a-path-b.md)) |
+| Path A claim (no AMFI) | **FAIL** (codesigning / 137) |
+| Path A claim (`amfi_get_out_of_my_way=1`) | Implemented; reboot proof pending |
+| Soft-inject / `thread_set_state` | **FAIL closed** |
+| Phase 3 Settings Take Over | Product gate still separate |
+| Operator how-to | [`path-a-path-b.md`](path-a-path-b.md) |
 
 Do not bootout `com.apple.watchdogd` without a successful disable ACK.
-Do not re-arm `claim-install` / `--path-b` on this host by default.
+Do not use lldb on `watchdogd`.
 
 ## Possible future paths
 
-- Named experiment only: `amfi_get_out_of_my_way=1` + Path A claim (not GOT /
-  `thread_set_state`). Revert boot-arg after.
-- New non-insert load idea for Path B (do not re-try ad-hoc `DYLD_INSERT`).
-- Then a separate plan for Wawona Take Over flip.
+- Operator guide (Path A/B arm + markers): [`path-a-path-b.md`](path-a-path-b.md).
+- Named experiment: `amfi_get_out_of_my_way=1` + Path A claim reboot proof.
+  Revert boot-arg after.
+- Product Take Over flip once Wawona consumes Path B `claim-ok`.
 - Do not re-run `thread_set_state` / lldb on the daily driver.
 - Java ≥17 HotSpot on 25F80 still SIGBUS; revisit for Ghidra headless.
 
