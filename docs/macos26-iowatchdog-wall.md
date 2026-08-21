@@ -5,17 +5,27 @@ SIP fully disabled. Goal: call `DisableUserspaceMonitoring` (selector 3) on
 the live `IOWatchdogUserClient` held by `/usr/libexec/watchdogd` without
 lldb (lldb attach exits watchdogd with SIGTRAP and panics).
 
-## Verdict (Phase 1.4 + Phase 2; updated 0.3.6)
+## Verdict (Phase 1.4 + Phase 2; updated 0.3.7)
 
 **Classic Take Over still blocked** until a sticky disable ACK is proven
-across reboot. Soft-inject / lldb stay fail-closed.
+across a reboot with Path B (or Path A+amfi). Soft-inject / lldb stay
+fail-closed.
 
-### Load-path RE (2026-08-20 late)
+### Load-path RE (2026-08-20 late → 0.3.7)
 
 | Failure | Root cause | Fix |
 |---------|------------|-----|
-| Path B SIGBUS 138 | **fishhook** GOT patch on arm64e PAC slots | **0.3.6:** `DYLD_INTERPOSE` + `dlsym(RTLD_NEXT)`. Lab: insert loads; sock `ping` OK as root. Second `watchdogd` while Apple's holds exclusive still exits 133 (expected). |
-| Path A `OS_REASON_CODESIGNING` / 137 | AMFI rejects ad-hoc forged `com.apple.private.iowatchdog.user-access` | Lean claim entitlements (iowatchdog only). Still needs `amfi_get_out_of_my_way=1` (or amfiexceptiond) for LaunchDaemon exec. |
+| Path B SIGBUS 138 | **fishhook** GOT patch on arm64e PAC slots | **0.3.6:** drop fishhook; use `DYLD_INTERPOSE` |
+| Path B SIGSEGV recursion | `dlsym` / `dlopen(IOKit)` returns the **interpose** (hook) | **0.3.7:** call `__DATA,__interpose` **replacee** as the real `IOConnectCallScalarMethod` |
+| Path B nested Disable SEGV / hang | Calling through hook alias; FILE I/O in hook | No I/O in hook; markers from reporter thread; Disable via next-call rewrite with replacee |
+| Path A `OS_REASON_CODESIGNING` / 137 | AMFI rejects ad-hoc forged `com.apple.private.iowatchdog.user-access` | Still needs `amfi_get_out_of_my_way=1` |
+
+**Lab sticky (0.3.7, sole instance):** `DYLD_INSERT` + `WWN_IOW_AUTO_DISABLE=1` on
+`/usr/libexec/watchdogd` with Apple bootout wrote
+`/var/db/wwn-iowatchdog/claim-ok` (`ok path=b sticky=1 replacee=1`) and
+`/tmp/libwayland-support/iowatchdog-userspace-disabled` with sock
+`done=1 dkr=0x0`. LaunchDaemon Path B still needs a clean reboot proof
+(scalar call cadence differs under launchd).
 
 IOWatchdog kext RE unchanged (Checkin=1, Disable=3, sticky `+0xa8`).
 
@@ -171,8 +181,8 @@ not crash. Prefer boot-time `DYLD_INSERT` after sticky claim. Current
 
 1. Path A claim — **FAIL without AMFI** (codesign). Lean entitlements in
    0.3.6; still needs `amfi_get_out_of_my_way=1` named reboot.
-2. Path B `DYLD_INSERT` — **fishhook FAIL (SIGBUS)**; **interpose fix in
-   0.3.6** (lab sock ping OK). **Reboot proof pending** (pathb armed).
+2. Path B `DYLD_INSERT` — **0.3.7 replacee** lab sticky OK; LaunchDaemon
+   reboot proof still required. Arm: `claim-install --path-b` then reboot.
 3. Take Over — **NOT FLIPPED**; `blocked-no-iowatchdog`.
 
 ### Path B reboot checklist (0.3.6 interpose; armed)

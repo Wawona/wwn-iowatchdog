@@ -468,7 +468,7 @@ int main(int argc, char **argv) {
             "usage: wwn-iowatchdog-claim-install [--path-b] "
             "[claim-bin|/path/to/bin|/path/to/pkg]\n"
             "       wwn-iowatchdog-claim-install --uninstall\n"
-            "  --path-b: DYLD_INTERPOSE hook (0.3.6+; fishhook removed)\n"
+            "  --path-b: DYLD_INTERPOSE hook (0.3.7+; replacee, not dlsym)\n"
             "  Path A claim: needs WWN_IOW_PATHA_EXPERIMENT=1 and usually\n"
             "    amfi_get_out_of_my_way=1 (AMFI otherwise SIGKILL/codesign)\n");
     return 0;
