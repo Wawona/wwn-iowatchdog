@@ -374,14 +374,7 @@ static int do_install_pathb(const char *arg) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: --path-b needs root\n");
     return 1;
   }
-  /* 25F80: DYLD_INSERT into watchdogd → SIGBUS 138. Refuse by default. */
-  if (getenv("WWN_IOW_PATHB_EXPERIMENT") == NULL) {
-    fprintf(stderr,
-            "wwn-iowatchdog-claim-install: --path-b refused on 25F80 "
-            "(SIGBUS on DYLD_INSERT; see docs/macos26-iowatchdog-wall.md).\n"
-            "  Named lab only: WWN_IOW_PATHB_EXPERIMENT=1 sudo … --path-b\n");
-    return 20;
-  }
+  /* 25F80: fishhook SIGBUS fixed via DYLD_INTERPOSE (0.3.6). Path B OK. */
   if (resolve_pkg_root(arg, root, sizeof(root)) != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: cannot resolve package root\n");
     return 2;
@@ -475,9 +468,9 @@ int main(int argc, char **argv) {
             "usage: wwn-iowatchdog-claim-install [--path-b] "
             "[claim-bin|/path/to/bin|/path/to/pkg]\n"
             "       wwn-iowatchdog-claim-install --uninstall\n"
-            "  25F80: Path A/B arm refused unless\n"
-            "    WWN_IOW_PATHA_EXPERIMENT=1  or  WWN_IOW_PATHB_EXPERIMENT=1\n"
-            "  See docs/macos26-iowatchdog-wall.md (hard wall).\n");
+            "  --path-b: DYLD_INTERPOSE hook (0.3.6+; fishhook removed)\n"
+            "  Path A claim: needs WWN_IOW_PATHA_EXPERIMENT=1 and usually\n"
+            "    amfi_get_out_of_my_way=1 (AMFI otherwise SIGKILL/codesign)\n");
     return 0;
   }
   if (argc >= 2 && strcmp(argv[1], "--uninstall") == 0)

@@ -12,7 +12,7 @@
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.3.5";
+        version = "0.3.6";
         src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
         # Hook MUST be arm64e (watchdogd is arm64e). CLI/claim are host arm64.
@@ -20,7 +20,7 @@
           runHook preBuild
           mkdir -p build
 
-          # arm64e hook dylib (loaded into /usr/libexec/watchdogd)
+          # arm64e hook dylib (DYLD_INTERPOSE; no fishhook GOT patch)
           $CC -O2 -Wall -Wextra -dynamiclib \
             -arch arm64e \
             -install_name /usr/local/lib/libwwn_watchdogd_hook.dylib \
@@ -66,22 +66,27 @@
             $out/lib/libwwn_watchdogd_hook.dylib
           install -m644 entitlements/wwn-iowatchdog.entitlements.plist \
             $out/share/wwn-iowatchdog/wwn-iowatchdog.entitlements.plist
+          install -m644 entitlements/wwn-iowatchdog-claim.entitlements.plist \
+            $out/share/wwn-iowatchdog/wwn-iowatchdog-claim.entitlements.plist
           install -m755 scripts/claim-arm.sh $out/bin/wwn-iowatchdog-claim-arm
           install -m755 scripts/claim-disarm.sh \
             $out/bin/wwn-iowatchdog-claim-disarm
           runHook postInstall
         '';
         # Sign after strip. Host /usr/bin/codesign (sandbox PATH has none).
-        # Ad-hoc forge of com.apple.private.iowatchdog.user-access: SIP-off
-        # lab only. Apple will not grant this for Developer ID.
+        # CLI keeps full entitlements (task_for_pid for status).
+        # Claim gets ONLY iowatchdog.user-access (leaner AMFI surface).
+        # Hook: ad-hoc, no private entitlements (runs inside Apple's binary).
         # claim-install stays WITHOUT private entitlements (interactive arm).
         postFixup = ''
           ENT=$out/share/wwn-iowatchdog/wwn-iowatchdog.entitlements.plist
+          ENT_CLAIM=$out/share/wwn-iowatchdog/wwn-iowatchdog-claim.entitlements.plist
           /usr/bin/codesign --force -s - --entitlements "$ENT" \
-            $out/bin/wwn-iowatchdog \
-            $out/bin/wwn-iowatchdog-claim \
-            $out/lib/libwwn_watchdogd_hook.dylib
+            $out/bin/wwn-iowatchdog
+          /usr/bin/codesign --force -s - --entitlements "$ENT_CLAIM" \
+            $out/bin/wwn-iowatchdog-claim
           /usr/bin/codesign --force -s - \
+            $out/lib/libwwn_watchdogd_hook.dylib \
             $out/bin/wwn-iowatchdog-claim-install
         '';
         meta = with pkgs.lib; {

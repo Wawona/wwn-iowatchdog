@@ -1,16 +1,19 @@
 /*
- * libwwn_watchdogd_hook.dylib — loaded into live watchdogd (arm64e).
+ * libwwn_watchdogd_hook.dylib — loaded into watchdogd via DYLD_INSERT
+ * (arm64e). Uses dyld __DATA,__interpose (NOT fishhook GOT patch).
  *
- * Captures the exclusive IOWatchdog io_connect_t from IOConnectCallScalarMethod
- * checkins, then serves disable/enable over /var/run/wwn-iowatchdog.sock.
+ * 25F80: fishhook rebind caused SIGBUS 138 on insert. Minimal ctor +
+ * DYLD_INTERPOSE loads cleanly under -arm64e_preview_abi.
  *
- * Never attach lldb. Constructor must not crash (would panic the machine).
+ * Captures IOWatchdog io_connect_t from IOConnectCallScalarMethod, serves
+ * disable/enable on /var/run/wwn-iowatchdog.sock. Optional sticky auto-
+ * disable after Checkin when WWN_IOW_AUTO_DISABLE=1.
+ *
+ * Never attach lldb. Constructor must not crash (PanicOnConsecutiveCrash).
  */
 #include <IOKit/IOKitLib.h>
-#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <pthread.h>
@@ -26,128 +29,30 @@
 #include "../common/wwn_watchdogd_job.h"
 
 typedef kern_return_t (*iocall_fn)(mach_port_t connection, uint32_t selector,
-                                   const uint64_t *input,
-                                   uint32_t inputCnt, uint64_t *output,
-                                   uint32_t *outputCnt);
+                                   const uint64_t *input, uint32_t inputCnt,
+                                   uint64_t *output, uint32_t *outputCnt);
 
 static iocall_fn g_orig_iocall = NULL;
 static io_connect_t g_conn = IO_OBJECT_NULL;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static int g_sock_fd = -1;
-static volatile int g_server_started = 0;
 
-/* ---- minimal fishhook (rebind one symbol in loaded images) ---- */
+static kern_return_t hooked_iocall(mach_port_t connection, uint32_t selector,
+                                   const uint64_t *input, uint32_t inputCnt,
+                                   uint64_t *output, uint32_t *outputCnt);
 
-struct wwn_rebinding {
-  const char *name;
-  void *replacement;
-  void **replaced;
-};
+/*
+ * dyld interpose: arm64e-safe. Do not fishhook-patch PAC'd GOT slots.
+ * Call the real symbol via g_orig_iocall from dlsym(RTLD_NEXT), never by
+ * the interposed name (would recurse).
+ */
+typedef struct {
+  const void *replacement;
+  const void *replacee;
+} wwn_interpose_t;
 
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
-#include <mach-o/nlist.h>
-
-#ifdef __LP64__
-typedef struct mach_header_64 wwn_mh_t;
-typedef struct segment_command_64 wwn_seg_t;
-typedef struct section_64 wwn_sec_t;
-typedef struct nlist_64 wwn_nlist_t;
-#define WWN_LC_SEGMENT LC_SEGMENT_64
-#else
-typedef struct mach_header wwn_mh_t;
-typedef struct segment_command wwn_seg_t;
-typedef struct section wwn_sec_t;
-typedef struct nlist wwn_nlist_t;
-#define WWN_LC_SEGMENT LC_SEGMENT
-#endif
-
-static void wwn_rebind_image(const struct mach_header *mh, intptr_t slide,
-                             struct wwn_rebinding *rebindings, size_t ne) {
-  Dl_info info;
-  if (dladdr(mh, &info) == 0)
-    return;
-
-  const wwn_mh_t *header = (const wwn_mh_t *)mh;
-  uintptr_t cur = (uintptr_t)(header + 1);
-  uintptr_t end = cur + header->sizeofcmds;
-  wwn_seg_t *linkedit = NULL;
-  struct symtab_command *symtab = NULL;
-  struct dysymtab_command *dysym = NULL;
-
-  while (cur < end) {
-    struct load_command *lc = (struct load_command *)cur;
-    if (lc->cmd == WWN_LC_SEGMENT) {
-      wwn_seg_t *seg = (wwn_seg_t *)cur;
-      if (strcmp(seg->segname, SEG_LINKEDIT) == 0)
-        linkedit = seg;
-    } else if (lc->cmd == LC_SYMTAB) {
-      symtab = (struct symtab_command *)cur;
-    } else if (lc->cmd == LC_DYSYMTAB) {
-      dysym = (struct dysymtab_command *)cur;
-    }
-    cur += lc->cmdsize;
-  }
-  if (!linkedit || !symtab || !dysym)
-    return;
-
-  uintptr_t linkedit_base =
-      (uintptr_t)slide + linkedit->vmaddr - linkedit->fileoff;
-  wwn_nlist_t *sym =
-      (wwn_nlist_t *)(linkedit_base + symtab->symoff);
-  char *strtab = (char *)(linkedit_base + symtab->stroff);
-  uint32_t *indirect =
-      (uint32_t *)(linkedit_base + dysym->indirectsymoff);
-
-  cur = (uintptr_t)(header + 1);
-  while (cur < end) {
-    struct load_command *lc = (struct load_command *)cur;
-    if (lc->cmd == WWN_LC_SEGMENT) {
-      wwn_seg_t *seg = (wwn_seg_t *)cur;
-      wwn_sec_t *secs = (wwn_sec_t *)(seg + 1);
-      for (uint32_t i = 0; i < seg->nsects; i++) {
-        wwn_sec_t *sec = &secs[i];
-        uint32_t flags = sec->flags & SECTION_TYPE;
-        if (flags != S_LAZY_SYMBOL_POINTERS &&
-            flags != S_NON_LAZY_SYMBOL_POINTERS)
-          continue;
-        uint32_t *isym = indirect + sec->reserved1;
-        void **bindings = (void **)((uintptr_t)slide + sec->addr);
-        uint32_t n = (uint32_t)(sec->size / sizeof(void *));
-        for (uint32_t j = 0; j < n; j++) {
-          uint32_t symIndex = isym[j];
-          if (symIndex == INDIRECT_SYMBOL_ABS ||
-              symIndex == INDIRECT_SYMBOL_LOCAL ||
-              symIndex == (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS))
-            continue;
-          uint32_t strx = sym[symIndex].n_un.n_strx;
-          const char *name = strtab + strx;
-          if (name[0] == '_')
-            name++;
-          for (size_t r = 0; r < ne; r++) {
-            if (strcmp(name, rebindings[r].name) != 0)
-              continue;
-            if (rebindings[r].replaced != NULL &&
-                *(rebindings[r].replaced) == NULL)
-              *(rebindings[r].replaced) = bindings[j];
-            bindings[j] = rebindings[r].replacement;
-          }
-        }
-      }
-    }
-    cur += lc->cmdsize;
-  }
-}
-
-static void wwn_rebind_symbols(struct wwn_rebinding *rebindings, size_t ne) {
-  uint32_t count = _dyld_image_count();
-  for (uint32_t i = 0; i < count; i++) {
-    wwn_rebind_image(_dyld_get_image_header(i),
-                     _dyld_get_image_vmaddr_slide(i), rebindings, ne);
-  }
-}
-
-/* ---- IOConnect hook ---- */
+__attribute__((used, section("__DATA,__interpose"))) static wwn_interpose_t
+    g_interpose_iocall = {(const void *)hooked_iocall,
+                          (const void *)IOConnectCallScalarMethod};
 
 static kern_return_t hooked_iocall(mach_port_t connection, uint32_t selector,
                                    const uint64_t *input, uint32_t inputCnt,
@@ -162,10 +67,6 @@ static kern_return_t hooked_iocall(mach_port_t connection, uint32_t selector,
   kern_return_t kr = g_orig_iocall(connection, selector, input, inputCnt,
                                    output, outputCnt);
 
-  /*
-   * Path B sticky: after first successful Checkin, DisableUserspaceMonitoring
-   * on the same connection (opt-in via WWN_IOW_AUTO_DISABLE=1). Fail soft.
-   */
   static volatile int auto_done = 0;
   if (kr == KERN_SUCCESS &&
       selector == (uint32_t)kIOWatchdogDaemonCheckin && !auto_done &&
@@ -184,7 +85,7 @@ static kern_return_t hooked_iocall(mach_port_t connection, uint32_t selector,
       mkdir(WWN_IOW_DB_DIR, 0755);
       FILE *ok = fopen(WWN_IOW_CLAIM_OK_STAMP, "w");
       if (ok) {
-        fputs("ok path=b sticky=1\n", ok);
+        fputs("ok path=b sticky=1 interpose=1\n", ok);
         fclose(ok);
       }
       unlink(WWN_IOW_CLAIM_PENDING);
@@ -201,10 +102,11 @@ static int call_on_conn(uint32_t selector, char *err, size_t errlen) {
     snprintf(err, errlen, "no connection captured yet");
     return -1;
   }
-  kern_return_t kr =
-      g_orig_iocall ? g_orig_iocall(c, selector, NULL, 0, NULL, NULL)
-                    : IOConnectCallScalarMethod(c, selector, NULL, 0, NULL,
-                                                NULL);
+  if (!g_orig_iocall) {
+    snprintf(err, errlen, "no orig IOConnectCallScalarMethod");
+    return -1;
+  }
+  kern_return_t kr = g_orig_iocall(c, selector, NULL, 0, NULL, NULL);
   if (kr != KERN_SUCCESS) {
     snprintf(err, errlen, "%s (0x%x)", mach_error_string(kr), (unsigned)kr);
     return -1;
@@ -230,8 +132,7 @@ static void handle_client(int fd) {
     pthread_mutex_lock(&g_mu);
     io_connect_t c = g_conn;
     pthread_mutex_unlock(&g_mu);
-    snprintf(reply, sizeof(reply),
-             "OK conn=%s port=0x%x\n",
+    snprintf(reply, sizeof(reply), "OK conn=%s port=0x%x\n",
              c != IO_OBJECT_NULL ? "captured" : "pending", (unsigned)c);
   } else if (strcmp(buf, "disable") == 0) {
     if (call_on_conn(kIOWatchdogDaemonDisableUserspaceMonitoring, err,
@@ -271,8 +172,6 @@ static void *server_thread(void *arg) {
     unlink(WWN_IOW_SOCK_PATH);
     return NULL;
   }
-  g_sock_fd = s;
-  g_server_started = 1;
   for (;;) {
     int c = accept(s, NULL, NULL);
     if (c < 0) {
@@ -288,20 +187,13 @@ static void *server_thread(void *arg) {
 
 __attribute__((constructor)) static void wwn_hook_init(void) {
   /*
-   * Fail soft: never abort. A constructor crash inside watchdogd panics
-   * the machine (PanicOnConsecutiveCrash).
+   * Resolve the real IOConnect before any interposed call. Fail soft.
    */
-  void *sym = dlsym(RTLD_DEFAULT, "IOConnectCallScalarMethod");
-  if (!sym)
-    return;
-
-  struct wwn_rebinding rebindings[1] = {
-      {"IOConnectCallScalarMethod", (void *)hooked_iocall,
-       (void **)&g_orig_iocall},
-  };
-  wwn_rebind_symbols(rebindings, 1);
+  g_orig_iocall =
+      (iocall_fn)dlsym(RTLD_NEXT, "IOConnectCallScalarMethod");
   if (!g_orig_iocall)
-    g_orig_iocall = (iocall_fn)sym;
+    g_orig_iocall =
+        (iocall_fn)dlsym(RTLD_DEFAULT, "IOConnectCallScalarMethod");
 
   pthread_t th;
   pthread_attr_t attr;

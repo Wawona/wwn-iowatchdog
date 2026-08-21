@@ -5,28 +5,21 @@ SIP fully disabled. Goal: call `DisableUserspaceMonitoring` (selector 3) on
 the live `IOWatchdogUserClient` held by `/usr/libexec/watchdogd` without
 lldb (lldb attach exits watchdogd with SIGTRAP and panics).
 
-## Verdict (Phase 1.4 + Phase 2 proofs, 2026-08-20 evening)
+## Verdict (Phase 1.4 + Phase 2; updated 0.3.6)
 
-**25F80 Classic blocked. No further safe avenue on this build without a
-new named experiment.**
+**Classic Take Over still blocked** until a sticky disable ACK is proven
+across reboot. Soft-inject / lldb stay fail-closed.
 
-Phase 1.4: soft-inject / GOT / lldb fail-closed (see below).
-Phase 2 proofs (same day):
+### Load-path RE (2026-08-20 late)
 
-| Gate | Result |
-|------|--------|
-| Path A claim reboot | **FAIL** `OS_REASON_CODESIGNING` (adhoc forged entitlement) |
-| Path B `DYLD_INSERT` reboot | **FAIL** SIGBUS 138 (7 successive crashes) |
-| Take Over | stays `WWN_MODEB_WD=blocked-no-iowatchdog` |
+| Failure | Root cause | Fix |
+|---------|------------|-----|
+| Path B SIGBUS 138 | **fishhook** GOT patch on arm64e PAC slots | **0.3.6:** `DYLD_INTERPOSE` + `dlsym(RTLD_NEXT)`. Lab: insert loads; sock `ping` OK as root. Second `watchdogd` while Apple's holds exclusive still exits 133 (expected). |
+| Path A `OS_REASON_CODESIGNING` / 137 | AMFI rejects ad-hoc forged `com.apple.private.iowatchdog.user-access` | Lean claim entitlements (iowatchdog only). Still needs `amfi_get_out_of_my_way=1` (or amfiexceptiond) for LaunchDaemon exec. |
 
-IOWatchdog kext RE is complete (selectors, exclusive, sticky `+0xa8`).
-Remaining failures are **AMFI / arm64e load policy**, not missing kext
-semantics. Do not enable Settings Take Over. Do not re-arm Path A claim
-or Path B insert on the daily driver. Optional future: named
-`amfi_get_out_of_my_way=1` Path A-only experiment (separate plan).
+IOWatchdog kext RE unchanged (Checkin=1, Disable=3, sticky `+0xa8`).
 
-`wwn-iowatchdog disable|enable|inject` stay fail closed. Wawona stays
-`WWN_MODEB_WD=blocked-no-iowatchdog`.
+`WWN_MODEB_WD=blocked-no-iowatchdog` until reboot proof of Path B (or Path A+amfi).
 
 ## What works
 
@@ -176,20 +169,24 @@ not crash. Prefer boot-time `DYLD_INSERT` after sticky claim. Current
 
 ### Proof gates
 
-1. Path A claim across reboot — **FAIL** (race `0xe00002c5`, then
-   `OS_REASON_CODESIGNING` after automated claim-install).
-2. Path B `DYLD_INSERT` sticky — **FAIL** (SIGBUS 138 ×7). Manual insert
-   also 138. Disarmed; Apple `watchdogd` restored.
-3. Wawona Take Over flip — **NOT STARTED**; stays `blocked-no-iowatchdog`.
+1. Path A claim — **FAIL without AMFI** (codesign). Lean entitlements in
+   0.3.6; still needs `amfi_get_out_of_my_way=1` named reboot.
+2. Path B `DYLD_INSERT` — **fishhook FAIL (SIGBUS)**; **interpose fix in
+   0.3.6** (lab sock ping OK). **Reboot proof pending** (pathb armed).
+3. Take Over — **NOT FLIPPED**; `blocked-no-iowatchdog`.
 
-### Do not re-arm (default)
+### Path B reboot checklist (0.3.6 interpose; armed)
 
 ```text
-# Refused unless WWN_IOW_PATHB_EXPERIMENT=1 (named lab only):
-#   sudo wwn-iowatchdog-claim-install --path-b
-# Path A claim similarly needs a named AMFI experiment; do not arm casually.
-# Abort / clean:
-#   sudo wwn-iowatchdog-claim-install --uninstall
+1. Reboot (pathb plist staged; Apple watchdogd persist-disabled)
+2. After login:
+     cat /var/db/wwn-iowatchdog/claim-ok
+     cat /tmp/libwayland-support/iowatchdog-userspace-disabled
+     ls -la /var/run/wwn-iowatchdog.sock
+     python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('/var/run/wwn-iowatchdog.sock');s.send(b'ping\n');print(s.recv(64))"
+     cat /var/log/wwn-iowatchdog-pathb.err.log
+3. Hold 60s; no panic
+4. Abort before reboot: sudo wwn-iowatchdog-claim-install --uninstall
 ```
 
 ### Path B load design (p3; after p2 only)
