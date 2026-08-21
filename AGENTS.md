@@ -3,23 +3,29 @@
 ## What this repo is
 
 L3′ **macOS Watchdog tools** for Wawona Desktop Mode B (Path A entitled
-open + claim; Path B hook socket). Lab scaffolding only on 25F80.
+claim; Path B arm64e DYLD_INTERPOSE hook). Soft-inject stays fail-closed.
 
 ## Never
 
 - lldb / debugserver / Cursor `lldb_mcp` attach to `watchdogd`
-- unload / `kickstart -k` watchdogd without a successful disable ACK
-- re-arm Path A / Path B without `WWN_IOW_PATHA_EXPERIMENT` /
-  `WWN_IOW_PATHB_EXPERIMENT` (both **FAIL** on 25F80; see wall)
-- flip Wawona Settings Take Over from this repo alone
+- `launchctl kickstart -k` on Apple `com.apple.watchdogd`
+- leave Apple persist-disabled with no live process and no Path A/B
+  successor plist (use `--doctor` / `--heal`)
+- `export DYLD_INSERT_LIBRARIES` in a parent shell (prefix on Path B
+  wrapper `exec` only)
+- flip Wawona Settings Take Over from this repo alone (product gate is
+  separate; stays `blocked-no-iowatchdog` until product wires ACKs)
 - add this flake as an input of L0-L2
 - ship these binaries in App Store / Play / Apple-mobile artifacts
 
-## macOS 26 wall
+## Status (25F80)
 
-**25F80 Classic hard wall (Phase 1.4 + Phase 2).** Soft-inject blocked.
-Path A claim FAIL (`OS_REASON_CODESIGNING`). Path B `DYLD_INSERT` FAIL
-(SIGBUS 138). Take Over stays `blocked-no-iowatchdog`. Full table:
+- Path B reboot sticky: **proven** (0.3.7+)
+- Path A reboot sticky: **proven** (0.3.9; needs `amfi_get_out_of_my_way=1`)
+- Soft-inject / `thread_set_state`: **fail closed**
+- Safety guards: `--doctor` / `--heal` (0.3.10+; edge harden 0.3.11)
+
+Operator guide: `docs/path-a-path-b.md`. Wall table:
 `docs/macos26-iowatchdog-wall.md`.
 
 ## DAG

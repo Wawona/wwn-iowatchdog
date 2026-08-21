@@ -83,8 +83,9 @@ the Path B ACK (separate change).
 | Path A claim (no AMFI) | **FAIL** (codesigning / 137) |
 | Path A claim (`amfi_get_out_of_my_way=1`) | **PASS** interactive + reboot sticky (0.3.9) |
 | Soft-inject / `thread_set_state` | **FAIL closed** |
-| Phase 3 Settings Take Over | Product gate still separate |
+| Phase 3 Settings Take Over | Consumes `claim-ok` (`iowatchdog-then-unload`); still needs green Classic proof |
 | Operator how-to | [`path-a-path-b.md`](path-a-path-b.md) |
+| Safety guards (coverage) | [`path-a-path-b.md`](path-a-path-b.md#safety-guards-0310) (`--doctor` / `--heal`) |
 
 Do not bootout `com.apple.watchdogd` without a successful disable ACK.
 Do not use lldb on `watchdogd`.

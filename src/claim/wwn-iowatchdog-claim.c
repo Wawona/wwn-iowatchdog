@@ -13,6 +13,7 @@
  * Default: sticky-release (disable, close, exit). --hold keeps exclusive.
  */
 #include "../common/wwn_iowatchdog.h"
+#include "../common/wwn_safety.h"
 #include "../common/wwn_watchdogd_job.h"
 
 #include <IOKit/IOKitLib.h>
@@ -35,25 +36,33 @@ static void on_signal(int sig) {
 }
 
 static int bootargs_has_amfi_relaxed(void) {
-  char buf[1024];
-  size_t len = sizeof(buf);
-  if (sysctlbyname("kern.bootargs", buf, &len, NULL, 0) != 0)
-    return 0;
-  if (len >= sizeof(buf))
-    len = sizeof(buf) - 1;
-  buf[len] = '\0';
-  return strstr(buf, "amfi_get_out_of_my_way=1") != NULL;
+  return wwn_safety_amfi_relaxed();
 }
 
-static void restore_apple_watchdogd(const char *why) {
+/*
+ * Restore Apple job and assert a live process. Does not clear claim-ok on
+ * failure (evidence preserved). Writes coverage-fail if still dead.
+ * Returns 0 if covered, non-zero otherwise.
+ */
+static int restore_apple_watchdogd(const char *why) {
   fprintf(stderr, "wwn-iowatchdog-claim: restore com.apple.watchdogd (%s)\n",
           why ? why : "");
   if (wwn_watchdogd_job_restore() != 0)
     fprintf(stderr,
-            "wwn-iowatchdog-claim: WARNING: restore failed; run:\n"
-            "  sudo launchctl enable system/com.apple.watchdogd\n"
-            "  sudo launchctl kickstart system/com.apple.watchdogd\n");
+            "wwn-iowatchdog-claim: WARNING: restore cmd failed; retry once\n");
+  if (!wwn_watchdogd_process_alive()) {
+    (void)wwn_watchdogd_job_restore();
+  }
+  if (wwn_safety_postflight(why ? why : "claim-restore") != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim: HARD FAIL: no live watchdogd after restore\n"
+            "  stamp: %s\n"
+            "  claim-ok left intact if present\n",
+            WWN_IOW_COVERAGE_FAIL);
+    return 1;
+  }
   wwn_iow_unlink_quiet(WWN_IOW_CLAIM_PENDING);
+  return 0;
 }
 
 static void write_ok_stamp(void) {
@@ -113,7 +122,7 @@ int main(int argc, char **argv) {
       kIOMainPortDefault, IOServiceMatching(WWN_IOW_SERVICE_NAME));
   if (svc == IO_OBJECT_NULL) {
     fprintf(stderr, "wwn-iowatchdog-claim: no IOWatchdog service\n");
-    restore_apple_watchdogd("no-service");
+    (void)restore_apple_watchdogd("no-service");
     return 2;
   }
   io_connect_t conn = IO_OBJECT_NULL;
@@ -123,7 +132,7 @@ int main(int argc, char **argv) {
   if (kr != KERN_SUCCESS) {
     fprintf(stderr, "wwn-iowatchdog-claim: IOServiceOpen: %s (0x%x)\n",
             mach_error_string(kr), (unsigned)kr);
-    restore_apple_watchdogd("open-failed");
+    (void)restore_apple_watchdogd("open-failed");
     return 3;
   }
 
@@ -133,7 +142,7 @@ int main(int argc, char **argv) {
             "wwn-iowatchdog-claim: DisableUserspaceMonitoring: %s (0x%x)\n",
             mach_error_string(kr), (unsigned)kr);
     IOServiceClose(conn);
-    restore_apple_watchdogd("disable-failed");
+    (void)restore_apple_watchdogd("disable-failed");
     return 4;
   }
 
@@ -157,8 +166,7 @@ int main(int argc, char **argv) {
             "wwn-iowatchdog-claim: Path A disable ACK; closed exclusive "
             "(sticky-after-close). pid=%d\n",
             (int)getpid());
-    restore_apple_watchdogd("sticky-ok");
-    return 0;
+    return restore_apple_watchdogd("sticky-ok") ? 10 : 0;
   }
 
   fprintf(stderr,
@@ -174,6 +182,5 @@ int main(int argc, char **argv) {
   fprintf(stderr,
           "wwn-iowatchdog-claim: released exclusive; monitoring left disabled "
           "(sticky)\n");
-  restore_apple_watchdogd("hold-exit");
-  return 0;
+  return restore_apple_watchdogd("hold-exit") ? 10 : 0;
 }

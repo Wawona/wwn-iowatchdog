@@ -12,13 +12,23 @@
 
       mkIowatchdog = pkgs: pkgs.stdenv.mkDerivation {
         pname = "wwn-iowatchdog";
-        version = "0.3.9";
+        version = "0.3.11";
         src = ./.;
         # Darwin stdenv ships apple-sdk; do not use removed apple_sdk.frameworks.
         # Hook MUST be arm64e (watchdogd is arm64e). CLI/claim are host arm64.
         buildPhase = ''
           runHook preBuild
           mkdir -p build
+
+          # Fail closed: never emit launchctl kickstart -k as a command.
+          if grep -RInE 'launchctl[[:space:]]+kickstart[[:space:]]+-k' src; then
+            echo "FORBIDDEN: launchctl kickstart -k in src" >&2
+            exit 1
+          fi
+          if grep -RInE 'system\("[^"]*kickstart -k' src; then
+            echo "FORBIDDEN: system(kickstart -k) in src" >&2
+            exit 1
+          fi
 
           # arm64e hook dylib (DYLD_INTERPOSE; no fishhook GOT patch)
           $CC -O2 -Wall -Wextra -dynamiclib \
@@ -33,6 +43,7 @@
             -o build/wwn-iowatchdog \
             src/wwn-iowatchdog.c \
             src/common/wwn_watchdogd_job.c \
+            src/common/wwn_safety.c \
             src/direct/wwn_iowatchdog_direct.c \
             src/sock/wwn_iowatchdog_sock.c \
             src/inject/wwn_watchdogd_inject.c \
@@ -43,13 +54,15 @@
             -o build/wwn-iowatchdog-claim \
             src/claim/wwn-iowatchdog-claim.c \
             src/common/wwn_watchdogd_job.c \
+            src/common/wwn_safety.c \
             -framework IOKit -framework CoreFoundation
 
           # Unentitled claim-install (no private entitlements: interactive OK)
           $CC -O2 -Wall -Wextra \
             -o build/wwn-iowatchdog-claim-install \
             src/claim/wwn-iowatchdog-claim-install.c \
-            src/common/wwn_watchdogd_job.c
+            src/common/wwn_watchdogd_job.c \
+            src/common/wwn_safety.c
 
           file build/libwwn_watchdogd_hook.dylib build/wwn-iowatchdog \
             build/wwn-iowatchdog-claim build/wwn-iowatchdog-claim-install

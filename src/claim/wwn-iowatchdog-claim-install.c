@@ -1,5 +1,5 @@
 /*
- * Unentitled claim-install / claim-uninstall.
+ * Unentitled claim-install / claim-uninstall / doctor / heal.
  *
  * Ad-hoc private entitlements on wwn-iowatchdog often cause interactive
  * SIGKILL (137). This helper only writes plists, copies binaries, and
@@ -9,9 +9,11 @@
  *   wwn-iowatchdog-claim-install --path-a [pkg]
  *   wwn-iowatchdog-claim-install --path-b [pkg]
  *   wwn-iowatchdog-claim-install --path-a-amfi-nvram
- *   wwn-iowatchdog-claim-install --uninstall
+ *   wwn-iowatchdog-claim-install --uninstall|--heal
+ *   wwn-iowatchdog-claim-install --doctor|--verify
  */
 #include "../common/wwn_iowatchdog.h"
+#include "../common/wwn_safety.h"
 #include "../common/wwn_watchdogd_job.h"
 
 #include <errno.h>
@@ -108,9 +110,21 @@ static int write_restore_plist(void) {
           "/bin/launchctl bootstrap system "
           "/System/Library/LaunchDaemons/com.apple.watchdogd.plist "
           "2>/dev/null; "
-          "/bin/launchctl kickstart system/com.apple.watchdogd "
-          "2>/dev/null; "
-          "rm -f /var/db/wwn-iowatchdog/claim-pending"
+          "alive=0; "
+          "for j in $(seq 1 30); do "
+          "  /bin/launchctl kickstart system/com.apple.watchdogd 2>/dev/null; "
+          "  if /usr/bin/pgrep -qx watchdogd; then "
+          "    alive=1; break; "
+          "  fi; "
+          "  sleep 0.2; "
+          "done; "
+          "if [ \"$alive\" != 1 ]; then "
+          "  echo 'wwn-restore: no live watchdogd after bootstrap' >&2; "
+          "  echo coverage-fail > /var/db/wwn-iowatchdog/coverage-fail; "
+          "  exit 1; "
+          "fi; "
+          "rm -f /var/db/wwn-iowatchdog/claim-pending "
+          "/var/db/wwn-iowatchdog/coverage-fail"
           "</string>\n"
           "  </array>\n"
           "  <key>RunAtLoad</key>\n"
@@ -137,13 +151,15 @@ static int launchctl_bootout(const char *label) {
   return 0;
 }
 
-static int launchctl_bootstrap(const char *plist) {
-  char cmd[512];
-  snprintf(cmd, sizeof(cmd), "/bin/launchctl bootstrap system '%s'", plist);
-  int st = system(cmd);
-  if (st == -1)
-    return -1;
-  return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+static void abort_path_a_stage(void) {
+  unlink(WWN_CLAIM_PLIST);
+  unlink(WWN_RESTORE_PLIST);
+  wwn_iow_unlink_quiet(WWN_IOW_CLAIM_PENDING);
+}
+
+static void abort_path_b_stage(void) {
+  unlink(WWN_PATHB_PLIST);
+  wwn_iow_unlink_quiet(WWN_IOW_CLAIM_PENDING);
 }
 
 /* Resolve claim + CLI sources from optional path or dirname(self). */
@@ -159,7 +175,6 @@ static int resolve_sources(const char *arg, char *claim_src, size_t claim_sz,
       return -1;
     }
     if (S_ISDIR(st.st_mode)) {
-      /* Accept …/bin or package root (…/bin siblings). */
       snprintf(claim_src, claim_sz, "%s/wwn-iowatchdog-claim", arg);
       snprintf(cli_src, cli_sz, "%s/wwn-iowatchdog", arg);
       if (stat(claim_src, &st) != 0) {
@@ -167,7 +182,6 @@ static int resolve_sources(const char *arg, char *claim_src, size_t claim_sz,
         snprintf(cli_src, cli_sz, "%s/bin/wwn-iowatchdog", arg);
       }
     } else {
-      /* Path to claim binary; CLI is sibling. */
       snprintf(claim_src, claim_sz, "%s", arg);
       snprintf(dir, sizeof(dir), "%s", arg);
       char *slash = strrchr(dir, '/');
@@ -197,23 +211,39 @@ static int resolve_sources(const char *arg, char *claim_src, size_t claim_sz,
 }
 
 static int bootargs_has_amfi_relaxed(void) {
-  char buf[1024];
-  size_t len = sizeof(buf);
-  if (sysctlbyname("kern.bootargs", buf, &len, NULL, 0) != 0)
-    return 0;
-  if (len >= sizeof(buf))
-    len = sizeof(buf) - 1;
-  buf[len] = '\0';
-  return strstr(buf, "amfi_get_out_of_my_way=1") != NULL;
+  return wwn_safety_amfi_relaxed();
+}
+
+/* Escape single quotes for nvram 'boot-args=…' shell string. */
+static void shell_single_quote_escape(const char *in, char *out, size_t out_sz) {
+  size_t j = 0;
+  for (size_t i = 0; in[i] && j + 4 < out_sz; i++) {
+    if (in[i] == '\'') {
+      /* end quote, literal ', reopen: '"'"' */
+      if (j + 4 >= out_sz)
+        break;
+      out[j++] = '\'';
+      out[j++] = '"';
+      out[j++] = '\'';
+      out[j++] = '"';
+      out[j++] = '\'';
+    } else {
+      out[j++] = in[i];
+    }
+  }
+  out[j] = '\0';
 }
 
 static int do_patha_amfi_nvram(void) {
   if (geteuid() != 0) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: --path-a-amfi-nvram needs root\n");
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: --path-a-amfi-nvram needs root\n");
     return 1;
   }
   if (bootargs_has_amfi_relaxed()) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: amfi_get_out_of_my_way=1 already set\n");
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: amfi_get_out_of_my_way=1 already "
+            "set\n");
     return 0;
   }
   char cur[1024];
@@ -225,13 +255,16 @@ static int do_patha_amfi_nvram(void) {
       len = sizeof(cur) - 1;
     cur[len] = '\0';
   }
-  char cmd[1536];
-  if (cur[0])
+  char esc[2048];
+  char cmd[4096];
+  if (cur[0]) {
+    shell_single_quote_escape(cur, esc, sizeof(esc));
     snprintf(cmd, sizeof(cmd),
-             "/usr/sbin/nvram 'boot-args=%s amfi_get_out_of_my_way=1'", cur);
-  else
+             "/usr/sbin/nvram 'boot-args=%s amfi_get_out_of_my_way=1'", esc);
+  } else {
     snprintf(cmd, sizeof(cmd),
              "/usr/sbin/nvram 'boot-args=amfi_get_out_of_my_way=1'");
+  }
   int st = system(cmd);
   if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: nvram failed\n");
@@ -240,20 +273,20 @@ static int do_patha_amfi_nvram(void) {
   fprintf(stderr,
           "wwn-iowatchdog-claim-install: nvram updated. Reboot, then:\n"
           "  sudo wwn-iowatchdog-claim-install --path-a /path/to/pkg\n"
-          "Revert: sudo nvram 'boot-args=%s'\n",
-          cur[0] ? cur : "");
+          "Revert: sudo nvram boot-args=… (restore prior args)\n");
   return 0;
 }
 
 static int do_install(const char *arg) {
   char claim_src[512];
   char cli_src[512];
+  int lock = -1;
+  int rc = 0;
 
   if (geteuid() != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: needs root\n");
     return 1;
   }
-  /* 25F80: adhoc forged entitlement → OS_REASON_CODESIGNING without AMFI off. */
   if (getenv("WWN_IOW_PATHA_EXPERIMENT") == NULL) {
     fprintf(stderr,
             "wwn-iowatchdog-claim-install: Path A refused without opt-in.\n"
@@ -263,27 +296,39 @@ static int do_install(const char *arg) {
             "  Prefer Path B (proven sticky): --path-b\n");
     return 20;
   }
-  if (!bootargs_has_amfi_relaxed() &&
-      getenv("WWN_IOW_PATHA_FORCE") == NULL) {
-    fprintf(stderr,
-            "wwn-iowatchdog-claim-install: Path A needs "
-            "amfi_get_out_of_my_way=1 in kern.bootargs.\n"
-            "  sudo wwn-iowatchdog-claim-install --path-a-amfi-nvram && reboot\n"
-            "  Or force (expect 137): WWN_IOW_PATHA_FORCE=1 … --path-a\n");
-    return 21;
+
+  lock = wwn_safety_arm_lock();
+  if (lock < 0)
+    return 19;
+
+  /* Mutually exclusive: tear down Path B before Path A preflight. */
+  launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-pathb");
+  unlink(WWN_PATHB_PLIST);
+
+  {
+    int pf = wwn_safety_preflight_arm(WWN_SAFETY_PATH_A, NULL);
+    if (pf != 0) {
+      rc = 20 + pf;
+      goto out;
+    }
   }
+
   if (resolve_sources(arg, claim_src, sizeof(claim_src), cli_src,
-                      sizeof(cli_src)) != 0)
-    return 2;
+                      sizeof(cli_src)) != 0) {
+    rc = 2;
+    goto out;
+  }
 
   if (mkdir_p(WWN_IOW_INSTALL_DIR) != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: mkdir %s failed\n",
             WWN_IOW_INSTALL_DIR);
-    return 3;
+    rc = 3;
+    goto out;
   }
   if (copy_file(claim_src, WWN_IOW_INSTALLED_CLAIM) != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: copy claim failed\n");
-    return 4;
+    rc = 4;
+    goto out;
   }
   {
     struct stat cli_st;
@@ -297,67 +342,97 @@ static int do_install(const char *arg) {
   if (wwn_iow_db_mkdir() != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: mkdir %s: %s\n",
             WWN_IOW_DB_DIR, strerror(errno));
-    return 5;
+    rc = 5;
+    goto out;
   }
   wwn_iow_unlink_quiet(WWN_IOW_CLAIM_OK_STAMP);
   if (wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "path-a-armed\n") != 0) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: cannot write claim-pending\n");
-    return 6;
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: cannot write claim-pending\n");
+    rc = 6;
+    goto out;
   }
 
-  if (write_claim_plist(WWN_IOW_INSTALLED_CLAIM) != 0)
-    return 7;
-  if (write_restore_plist() != 0)
-    return 8;
-
-  /* Path A and Path B are mutually exclusive holders. */
-  launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-pathb");
-  unlink(WWN_PATHB_PLIST);
-
-  if (wwn_watchdogd_job_disable() != 0) {
-    fprintf(stderr,
-            "wwn-iowatchdog-claim-install: WARNING: launchctl disable "
-            "system/com.apple.watchdogd failed\n");
+  if (write_claim_plist(WWN_IOW_INSTALLED_CLAIM) != 0) {
+    abort_path_a_stage();
+    rc = 7;
+    goto out;
+  }
+  if (write_restore_plist() != 0) {
+    abort_path_a_stage();
+    rc = 8;
+    goto out;
   }
 
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-claim");
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-restore");
-  /*
-   * Stage plists only (like Path B). Bootstrapping claim+restore in this
-   * session races the restore helper (90s then re-enables Apple and clears
-   * pending). Claim RunAtLoad on the next reboot wins exclusive.
-   */
+
+  if (!wwn_watchdogd_process_alive()) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: no live watchdogd before "
+            "persist-disable; aborting arm\n");
+    abort_path_a_stage();
+    (void)wwn_safety_postflight("path-a-arm-abort");
+    rc = 22;
+    goto out;
+  }
+
+  if (wwn_watchdogd_job_disable_verified() != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: persist-disable failed/unverified; "
+            "aborting\n");
+    abort_path_a_stage();
+    (void)wwn_safety_postflight("path-a-disable-fail");
+    rc = 23;
+    goto out;
+  }
+
+  if (wwn_safety_postflight("path-a-arm") != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: postflight uncovered; disarming\n");
+    abort_path_a_stage();
+    (void)wwn_watchdogd_job_restore();
+    rc = 24;
+    goto out;
+  }
+
+  if (!wwn_safety_reboot_successor_ok()) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: successor check failed after arm\n");
+    abort_path_a_stage();
+    (void)wwn_watchdogd_job_restore();
+    (void)wwn_safety_postflight("path-a-successor-fail");
+    rc = 25;
+    goto out;
+  }
+
   fprintf(stderr,
           "wwn-iowatchdog-claim-install: Path A claim armed.\n"
           "  Claim: %s (entitled iowatchdog.user-access)\n"
-          "  Plists staged; Apple watchdogd persist-disabled.\n"
+          "  Plists staged; Apple job persist-disabled; process still live.\n"
           "  Reboot now. After login:\n"
+          "    sudo wwn-iowatchdog-claim-install --doctor\n"
           "    cat /var/db/wwn-iowatchdog/claim-ok\n"
-          "    cat /tmp/libwayland-support/iowatchdog-userspace-disabled\n"
           "  Abort: sudo wwn-iowatchdog-claim-install --uninstall\n",
           WWN_IOW_INSTALLED_CLAIM);
-  return 0;
+  rc = 0;
+
+out:
+  wwn_safety_arm_unlock(lock);
+  return rc;
 }
 
-/* Resolve package root (…/bin parent) for lib/ hook. */
 static int resolve_pkg_root(const char *arg, char *root, size_t root_sz) {
   char self[PROC_PIDPATHINFO_MAXSIZE];
   char dir[PROC_PIDPATHINFO_MAXSIZE];
   struct stat st;
 
   if (arg && arg[0] && stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
-    /* If arg is …/bin, parent is root; if arg is root, use as-is. */
     snprintf(dir, sizeof(dir), "%s/lib/%s", arg, WWN_IOW_HOOK_NAME);
     if (stat(dir, &st) == 0) {
       snprintf(root, root_sz, "%s", arg);
       return 0;
     }
-    snprintf(dir, sizeof(dir), "%s/../lib/%s", arg, WWN_IOW_HOOK_NAME);
-    /* arg might be bin/ */
-    char parent[512];
-    snprintf(parent, sizeof(parent), "%s/..", arg);
-    snprintf(dir, sizeof(dir), "%s/lib/%s", parent, WWN_IOW_HOOK_NAME);
-    /* realpath-ish: if arg ends with /bin */
     size_t n = strlen(arg);
     if (n >= 4 && strcmp(arg + n - 4, "/bin") == 0) {
       snprintf(root, root_sz, "%.*s", (int)(n - 4), arg);
@@ -373,11 +448,11 @@ static int resolve_pkg_root(const char *arg, char *root, size_t root_sz) {
   char *slash = strrchr(dir, '/');
   if (!slash)
     return -1;
-  *slash = '\0'; /* …/bin */
+  *slash = '\0';
   slash = strrchr(dir, '/');
   if (!slash)
     return -1;
-  *slash = '\0'; /* package root */
+  *slash = '\0';
   snprintf(root, root_sz, "%s", dir);
   return 0;
 }
@@ -388,11 +463,12 @@ static int write_pathb_wrapper(void) {
     return -1;
   fprintf(f,
           "#!/bin/bash\n"
-          "# Path B: load arm64e hook into Apple's watchdogd (no forged "
-          "entitlements).\n"
-          "export DYLD_INSERT_LIBRARIES='%s'\n"
-          "export WWN_IOW_AUTO_DISABLE=1\n"
-          "exec /usr/libexec/watchdogd \"$@\"\n",
+          "# Path B: prefix env on exec only (never export DYLD_INSERT in "
+          "the parent shell).\n"
+          "exec /usr/bin/env "
+          "DYLD_INSERT_LIBRARIES='%s' "
+          "WWN_IOW_AUTO_DISABLE=1 "
+          "/usr/libexec/watchdogd \"$@\"\n",
           WWN_IOW_INSTALLED_HOOK);
   fclose(f);
   chmod(WWN_IOW_INSTALLED_WRAPPER, 0755);
@@ -439,79 +515,160 @@ static int do_install_pathb(const char *arg) {
   char root[512];
   char hook_src[576];
   struct stat st;
+  int lock = -1;
+  int rc = 0;
 
   if (geteuid() != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: --path-b needs root\n");
     return 1;
   }
-  /* 25F80: fishhook SIGBUS fixed via DYLD_INTERPOSE (0.3.6). Path B OK. */
+  lock = wwn_safety_arm_lock();
+  if (lock < 0)
+    return 19;
+
   if (resolve_pkg_root(arg, root, sizeof(root)) != 0) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: cannot resolve package root\n");
-    return 2;
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: cannot resolve package root\n");
+    rc = 2;
+    goto out;
   }
   snprintf(hook_src, sizeof(hook_src), "%s/lib/%s", root, WWN_IOW_HOOK_NAME);
   if (stat(hook_src, &st) != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: hook missing: %s\n",
             hook_src);
-    return 3;
+    rc = 3;
+    goto out;
   }
 
-  if (mkdir_p(WWN_IOW_INSTALL_DIR) != 0)
-    return 4;
-  if (copy_file(hook_src, WWN_IOW_INSTALLED_HOOK) != 0) {
-    fprintf(stderr, "wwn-iowatchdog-claim-install: copy hook failed\n");
-    return 5;
-  }
-  if (write_pathb_wrapper() != 0)
-    return 6;
-  if (write_pathb_plist() != 0)
-    return 7;
-
-  if (wwn_iow_db_mkdir() != 0)
-    return 8;
-  wwn_iow_unlink_quiet(WWN_IOW_CLAIM_OK_STAMP);
-  if (wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "path-b-armed\n") != 0)
-    return 9;
-
-  /* Tear down Path A claim daemons (adhoc entitled claim dies on AMFI). */
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-claim");
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-restore");
   unlink(WWN_CLAIM_PLIST);
   unlink(WWN_RESTORE_PLIST);
 
-  if (wwn_watchdogd_job_disable() != 0) {
+  {
+    int pf = wwn_safety_preflight_arm(WWN_SAFETY_PATH_B, hook_src);
+    if (pf != 0) {
+      rc = 30 + pf;
+      goto out;
+    }
+  }
+
+  if (mkdir_p(WWN_IOW_INSTALL_DIR) != 0) {
+    rc = 4;
+    goto out;
+  }
+  if (copy_file(hook_src, WWN_IOW_INSTALLED_HOOK) != 0) {
+    fprintf(stderr, "wwn-iowatchdog-claim-install: copy hook failed\n");
+    rc = 5;
+    goto out;
+  }
+  if (!wwn_safety_hook_is_arm64e(WWN_IOW_INSTALLED_HOOK) ||
+      !wwn_safety_hook_codesign_ok(WWN_IOW_INSTALLED_HOOK)) {
     fprintf(stderr,
-            "wwn-iowatchdog-claim-install: WARNING: disable "
-            "com.apple.watchdogd failed\n");
+            "wwn-iowatchdog-claim-install: installed hook failed "
+            "arm64e/codesign check\n");
+    unlink(WWN_IOW_INSTALLED_HOOK);
+    rc = 35;
+    goto out;
+  }
+  if (write_pathb_wrapper() != 0) {
+    rc = 6;
+    goto out;
+  }
+  if (write_pathb_plist() != 0) {
+    abort_path_b_stage();
+    rc = 7;
+    goto out;
+  }
+
+  if (wwn_iow_db_mkdir() != 0) {
+    abort_path_b_stage();
+    rc = 8;
+    goto out;
+  }
+  wwn_iow_unlink_quiet(WWN_IOW_CLAIM_OK_STAMP);
+  if (wwn_iow_write_file(WWN_IOW_CLAIM_PENDING, "path-b-armed\n") != 0) {
+    abort_path_b_stage();
+    rc = 9;
+    goto out;
   }
 
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-pathb");
-  /*
-   * Do not bootstrap pathb while Apple's watchdogd is still live this
-   * session (KeepAlive thrash / exclusive conflict). Plist in
-   * /Library/LaunchDaemons loads on the next reboot after Apple's job
-   * stays persist-disabled.
-   */
+
+  if (!wwn_watchdogd_process_alive()) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: no live watchdogd before "
+            "persist-disable; aborting Path B arm\n");
+    abort_path_b_stage();
+    (void)wwn_safety_postflight("path-b-arm-abort");
+    rc = 32;
+    goto out;
+  }
+
+  if (wwn_watchdogd_job_disable_verified() != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: persist-disable failed/unverified; "
+            "aborting\n");
+    abort_path_b_stage();
+    (void)wwn_safety_postflight("path-b-disable-fail");
+    rc = 33;
+    goto out;
+  }
+
+  if (wwn_safety_postflight("path-b-arm") != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: postflight uncovered; disarming "
+            "Path B\n");
+    abort_path_b_stage();
+    (void)wwn_watchdogd_job_restore();
+    rc = 34;
+    goto out;
+  }
+
+  if (!wwn_safety_reboot_successor_ok()) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: successor check failed after Path B "
+            "arm\n");
+    abort_path_b_stage();
+    (void)wwn_watchdogd_job_restore();
+    (void)wwn_safety_postflight("path-b-successor-fail");
+    rc = 36;
+    goto out;
+  }
+
   fprintf(stderr,
           "wwn-iowatchdog-claim-install: Path B sticky armed.\n"
           "  Hook: %s\n"
-          "  Plist staged (loads next boot; not started this session).\n"
+          "  Plist staged (loads next boot); Apple process still live.\n"
           "  Auto-disable after Checkin (WWN_IOW_AUTO_DISABLE=1).\n"
           "  Reboot now. After login:\n"
+          "    sudo wwn-iowatchdog-claim-install --doctor\n"
           "    cat /var/db/wwn-iowatchdog/claim-ok\n"
-          "    cat /tmp/libwayland-support/iowatchdog-userspace-disabled\n"
-          "    ls -la /var/run/wwn-iowatchdog.sock\n"
-          "  Abort without reboot:\n"
-          "    sudo wwn-iowatchdog-claim-install --uninstall\n",
+          "  Abort: sudo wwn-iowatchdog-claim-install --uninstall\n",
           WWN_IOW_INSTALLED_HOOK);
-  return 0;
+  rc = 0;
+
+out:
+  wwn_safety_arm_unlock(lock);
+  return rc;
 }
 
 static int do_uninstall(void) {
+  int lock = -1;
   if (geteuid() != 0) {
     fprintf(stderr, "wwn-iowatchdog-claim-install: --uninstall needs root\n");
     return 1;
   }
+  lock = wwn_safety_arm_lock();
+  if (lock < 0)
+    return 19;
+
+  /*
+   * Order matters: enable Apple first, then bootout our holders (Path B may
+   * be the live watchdogd), then restore+kickstart in a tight loop so the
+   * uncovered window is minimal.
+   */
+  (void)wwn_watchdogd_job_enable();
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-claim");
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-restore");
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-pathb");
@@ -520,15 +677,23 @@ static int do_uninstall(void) {
   unlink(WWN_PATHB_PLIST);
   unlink(WWN_IOW_CLAIM_MARKER);
   wwn_iow_unlink_quiet(WWN_IOW_CLAIM_PENDING);
-  /* Keep durable binaries; only disarm jobs. */
-  if (wwn_watchdogd_job_restore() != 0)
+
+  int rc = 0;
+  if (wwn_watchdogd_job_restore() != 0 ||
+      wwn_safety_postflight("uninstall") != 0 ||
+      !wwn_safety_reboot_successor_ok()) {
     fprintf(stderr,
-            "wwn-iowatchdog-claim-install: WARNING: failed to restore "
-            "com.apple.watchdogd\n");
-  fprintf(stderr,
-          "wwn-iowatchdog-claim-install: claim/pathb/restore removed; "
-          "com.apple.watchdogd re-enabled\n");
-  return 0;
+            "wwn-iowatchdog-claim-install: HARD FAIL: uninstall left machine "
+            "uncovered or Apple still persist-disabled\n"
+            "  Try: sudo wwn-iowatchdog-claim-install --heal\n");
+    rc = 2;
+  } else {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: claim/pathb/restore removed; "
+            "com.apple.watchdogd live again\n");
+  }
+  wwn_safety_arm_unlock(lock);
+  return rc;
 }
 
 int main(int argc, char **argv) {
@@ -538,13 +703,22 @@ int main(int argc, char **argv) {
             "usage: wwn-iowatchdog-claim-install --path-a [pkg]\n"
             "       wwn-iowatchdog-claim-install --path-b [pkg]\n"
             "       wwn-iowatchdog-claim-install --path-a-amfi-nvram\n"
-            "       wwn-iowatchdog-claim-install --uninstall\n"
-            "  --path-b: DYLD_INTERPOSE hook (0.3.7+; reboot sticky proven)\n"
-            "  --path-a: entitled claim daemon (needs amfi_get_out_of_my_way=1)\n"
+            "       wwn-iowatchdog-claim-install --uninstall|--heal\n"
+            "       wwn-iowatchdog-claim-install --doctor|--verify\n"
+            "  --path-b: DYLD_INTERPOSE hook (reboot sticky proven)\n"
+            "  --path-a: entitled claim (needs amfi_get_out_of_my_way=1)\n"
             "  --path-a-amfi-nvram: append that boot-arg (reboot after)\n"
+            "  --doctor/--verify: coverage + reboot-successor (exit 0 iff OK)\n"
+            "  --heal: tear down Path A/B; restore Apple coverage\n"
+            "  --uninstall: same as heal for jobs/plists (keeps claim-ok)\n"
             "  pkg: nix result root or …/bin (default: next to this binary)\n");
     return 0;
   }
+  if (argc >= 2 && (strcmp(argv[1], "--doctor") == 0 ||
+                    strcmp(argv[1], "--verify") == 0))
+    return wwn_safety_doctor();
+  if (argc >= 2 && strcmp(argv[1], "--heal") == 0)
+    return wwn_safety_heal();
   if (argc >= 2 && strcmp(argv[1], "--uninstall") == 0)
     return do_uninstall();
   if (argc >= 2 && strcmp(argv[1], "--path-a-amfi-nvram") == 0)

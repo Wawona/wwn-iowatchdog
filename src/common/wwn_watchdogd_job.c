@@ -1,4 +1,5 @@
 #include "wwn_watchdogd_job.h"
+#include "wwn_safety.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -54,6 +55,15 @@ int wwn_watchdogd_job_restore(void) {
   (void)run_cmd("/bin/launchctl bootstrap system "
                 "/System/Library/LaunchDaemons/com.apple.watchdogd.plist "
                 "2>/dev/null");
-  int k = wwn_watchdogd_job_kickstart();
-  return (e != 0) ? e : k;
+  int last_k = -1;
+  for (int i = 0; i < 15; i++) {
+    last_k = wwn_watchdogd_job_kickstart();
+    if (wwn_watchdogd_process_alive())
+      return (e != 0) ? e : 0;
+    usleep(200000); /* 200ms */
+  }
+  fprintf(stderr,
+          "wwn-watchdogd-job: restore: still no live /usr/libexec/watchdogd "
+          "after enable+bootstrap+kickstart\n");
+  return (e != 0) ? e : (last_k != 0 ? last_k : 1);
 }
