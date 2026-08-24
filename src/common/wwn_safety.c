@@ -399,6 +399,15 @@ int wwn_safety_heal(void) {
   }
   if (wwn_watchdogd_job_restore() != 0 ||
       wwn_safety_postflight("heal") != 0) {
+    if (wwn_safety_reboot_successor_ok() &&
+        !wwn_safety_apple_job_disabled()) {
+      fprintf(stderr,
+              "wwn-safety: heal: Apple job enabled; watchdogd did not stay "
+              "running this session. Restart this Mac. Do not kickstart -k. "
+              "Do not Take Over until Check coverage says Apple covering.\n");
+      stamp_coverage_fail("heal-reboot-required");
+      return 4;
+    }
     fprintf(stderr, "wwn-safety: heal HARD FAIL: still uncovered\n");
     return 2;
   }
@@ -502,13 +511,30 @@ int wwn_safety_doctor(void) {
   printf("  pathb_sock: %s%s\n", sock ? "yes" : "no",
          sock ? (sock_live ? " (live)" : " (STALE inode)") : "");
   printf("  coverage-fail stamp: %s\n", covfail ? "yes" : "no");
+  /*
+   * Apple job persist-enabled, Path A/B gone, but no live watchdogd:
+   * LaunchEvents will not keep a oneshot this session. Next boot is
+   * the restore. Do not send the user back through Restore in a loop.
+   */
+  int reboot_now = (!cov && succ && !path_a && !path_b && !disabled_map) ? 1
+                                                                        : 0;
+
   printf("  /usr/libexec/watchdogd pid: %s\n", pidbuf);
   printf("  coverage_ok: %s\n", cov ? "yes" : "NO");
+  printf("  reboot_now: %s\n", reboot_now ? "yes" : "no");
   fflush(stdout);
 
   int fail = 0;
   if (!cov) {
-    fprintf(stderr, "wwn-safety: doctor: FAIL uncovered (no live watchdogd)\n");
+    if (reboot_now) {
+      fprintf(stderr,
+              "wwn-safety: doctor: FAIL reboot required "
+              "(watchdogd not running this session; Apple job enabled). "
+              "Restart this Mac. Do not Take Over until coverage is live.\n");
+    } else {
+      fprintf(stderr,
+              "wwn-safety: doctor: FAIL uncovered (no live watchdogd)\n");
+    }
     fail = 1;
   }
   if (!succ) {

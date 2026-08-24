@@ -83,11 +83,13 @@ int wwn_watchdogd_job_restore(void) {
   }
 
   /*
-   * Apple's plist starts from IOKit LaunchEvents, not KeepAlive=true.
-   * SuccessfulExit=false: kickstart without -k runs once, watchdogd
-   * exits 0, launchd does not restart it. Heal then reported OK while
-   * doctor saw no process. Re-register LaunchEvents only when the
-   * process is already gone.
+   * Apple's plist is IOKit LaunchEvents (IOWatchdog + IOMatchLaunchStream)
+   * with KeepAlive SuccessfulExit=false and event keepalive=0. kickstart
+   * without -k is a oneshot (exit 0, no restart) and burns launchd
+   * exponential throttle (grace 10; this Mac already had runs=6). Do not
+   * kickstart-loop. Re-register LaunchEvents only while the process is
+   * gone, then wait. If it still will not stay, the next boot is the
+   * real restore. Never kickstart -k. Never bootout a live daemon.
    */
   if (!wwn_watchdogd_process_alive()) {
     (void)run_cmd("/bin/launchctl bootout " WWN_APPLE_WATCHDOGD_JOB
@@ -95,23 +97,16 @@ int wwn_watchdogd_job_restore(void) {
     (void)run_cmd("/bin/launchctl bootstrap system "
                   "/System/Library/LaunchDaemons/com.apple.watchdogd.plist "
                   "2>/dev/null");
-    for (int i = 0; i < 25; i++) {
+    for (int i = 0; i < 40; i++) {
       if (wwn_watchdogd_process_alive() && watchdogd_stayed_alive(1500))
         return (e != 0) ? e : 0;
       usleep(200000);
     }
   }
 
-  int last_k = -1;
-  for (int i = 0; i < 10; i++) {
-    last_k = wwn_watchdogd_job_kickstart();
-    if (wwn_watchdogd_process_alive() && watchdogd_stayed_alive(1500))
-      return (e != 0) ? e : 0;
-    usleep(200000);
-  }
   fprintf(stderr,
           "wwn-watchdogd-job: restore: /usr/libexec/watchdogd did not stay "
-          "running after LaunchEvents re-register + kickstart (no -k). "
+          "running after LaunchEvents re-register (no kickstart). "
           "Restart this Mac. Do not kickstart -k.\n");
-  return (e != 0) ? e : (last_k != 0 ? last_k : 1);
+  return (e != 0) ? e : 1;
 }

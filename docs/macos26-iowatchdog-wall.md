@@ -164,8 +164,10 @@ not crash. Prefer boot-time `DYLD_INSERT` after sticky claim. Current
 `inject-launchd` is echo-only (records hook path; does not attach insert).
 `launchctl kickstart` without `-k` is a oneshot here: watchdogd starts,
 exits 0, launchd does not restart it. Heal must re-register LaunchEvents
-(bootout+bootstrap while the process is already gone) and dwell until
-the daemon stays up. Never `kickstart -k`. Never bootout a live watchdogd.
+(bootout+bootstrap while the process is already gone) and dwell. Do not
+kickstart-loop (burns exponential throttle). If the daemon still will not
+stay, the Apple job is persist-enabled and the next boot is the restore.
+Never `kickstart -k`. Never bootout a live watchdogd.
 
 ### Design consequence
 

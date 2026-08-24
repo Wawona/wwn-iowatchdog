@@ -23,7 +23,7 @@ claim; Path B arm64e DYLD_INTERPOSE hook). Soft-inject stays fail-closed.
 - Path B reboot sticky: **proven** (0.3.7+)
 - Path A reboot sticky: **proven** (0.3.9; needs `amfi_get_out_of_my_way=1`)
 - Soft-inject / `thread_set_state`: **fail closed**
-- Safety guards: `--doctor` / `--heal` (0.3.10+; edge harden 0.3.11; stale Path B sock 0.3.13; LaunchEvents heal 0.3.14)
+- Safety guards: `--doctor` / `--heal` (0.3.10+; edge harden 0.3.11; stale Path B sock 0.3.13; LaunchEvents heal 0.3.14; reboot-required 0.3.15)
 
 Operator guide: `docs/path-a-path-b.md`. Wall table:
 `docs/macos26-iowatchdog-wall.md`.
