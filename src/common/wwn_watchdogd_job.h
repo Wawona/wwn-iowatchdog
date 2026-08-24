@@ -29,8 +29,16 @@ int wwn_watchdogd_job_disable(void);
 int wwn_watchdogd_job_enable(void);
 /* Start if not running. Never passes -k. */
 int wwn_watchdogd_job_kickstart(void);
-/* enable + kickstart (no -k). Safe when daemon is down. */
+/*
+ * Enable Apple's job and get a *stable* /usr/libexec/watchdogd.
+ * macOS 26 KeepAlive SuccessfulExit=false plus IOKit LaunchEvents: a
+ * kickstart without -k is a oneshot (exit 0, no restart). Restore
+ * re-registers LaunchEvents (bootout+bootstrap) only while no
+ * watchdogd is live. Never kickstart -k. Never bootout a live daemon.
+ */
 int wwn_watchdogd_job_restore(void);
+/* Wait until /usr/libexec/watchdogd is gone. 0 = gone, -1 = still alive. */
+int wwn_watchdogd_wait_gone(unsigned timeout_ms);
 
 int wwn_iow_db_mkdir(void);
 int wwn_iow_write_file(const char *path, const char *text);

@@ -75,8 +75,8 @@ process and no staged successor that will run at next boot.
 | Persist-disable | Only after plists/wrapper written; **verified** via `print-disabled`; only while a live pid still exists |
 | `wwn_safety_postflight` | After arm / claim restore / uninstall: require live pid; else restore Apple and recheck; stamp `coverage-fail` on hard fail |
 | `wwn_safety_reboot_successor_ok` | If Apple is persist-disabled, Path A or Path B plist must exist (else next boot is uncovered) |
-| `wwn_watchdogd_job_restore` | enable + bootstrap + kickstart (no `-k`), retry until alive or timeout |
-| Restore LaunchDaemon | Waits for `pgrep watchdogd` after bootstrap; exits non-zero if still dead |
+| `wwn_watchdogd_job_restore` | enable; if down, re-register IOKit LaunchEvents (bootout+bootstrap of a not-running Apple job); dwell until `/usr/libexec/watchdogd` stays up; kickstart without `-k` only as last resort |
+| Restore LaunchDaemon | Same dwell. A kickstart flash (exit 0, `KeepAlive SuccessfulExit=false`) is not coverage |
 | Arm lock | `/var/db/wwn-iowatchdog/arm.lock` (flock) serializes arm/uninstall |
 
 Doctor / verify (exit 0 only if covered **and** reboot-successor OK **and** not dual-path):

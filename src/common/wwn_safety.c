@@ -333,8 +333,8 @@ static void stamp_coverage_fail(const char *why) {
 }
 
 int wwn_safety_postflight(const char *why) {
-  /* Settle: catch race where process exits just after disable. */
-  usleep(50000);
+  /* Dwell: kickstart oneshots exit 0 within ~1s (KeepAlive SuccessfulExit=false). */
+  usleep(1500000);
   if (wwn_coverage_ok()) {
     wwn_iow_unlink_quiet(WWN_IOW_COVERAGE_FAIL);
     return 0;
@@ -343,7 +343,7 @@ int wwn_safety_postflight(const char *why) {
           "wwn-safety: postflight: no live watchdogd (%s); restoring Apple\n",
           why ? why : "");
   (void)wwn_watchdogd_job_restore();
-  usleep(100000);
+  usleep(1500000);
   if (wwn_coverage_ok()) {
     fprintf(stderr, "wwn-safety: postflight: coverage recovered\n");
     wwn_iow_unlink_quiet(WWN_IOW_COVERAGE_FAIL);
@@ -369,7 +369,7 @@ int wwn_safety_heal(void) {
     return 1;
   }
   fprintf(stderr, "wwn-safety: heal: tear down Path A/B; restore Apple\n");
-  /* Enable Apple first so kickstart can succeed after bootout. */
+  /* Enable Apple first so restore can load the job after Path B bootout. */
   (void)wwn_watchdogd_job_enable();
   bootout_label("com.aspauldingcode.wwn-iowatchdog-claim");
   bootout_label("com.aspauldingcode.wwn-iowatchdog-restore");
@@ -386,6 +386,17 @@ int wwn_safety_heal(void) {
     wwn_iow_unlink_quiet(WWN_IOW_CLAIM_OK_STAMP);
   wwn_iow_unlink_quiet(WWN_IOW_SOCK_PATH);
   wwn_iow_unlink_quiet(WWN_IOW_DISABLED_MARKER);
+  /*
+   * Path B's hooked watchdogd may still be exiting. Starting Apple's
+   * daemon beside it is SIGTRAP class. Wait until the binary is gone.
+   */
+  if (wwn_watchdogd_wait_gone(5000) != 0) {
+    fprintf(stderr,
+            "wwn-safety: heal HARD FAIL: previous watchdogd still alive "
+            "after Path A/B bootout; not starting a second Apple daemon\n");
+    stamp_coverage_fail("heal-dual-watchdogd");
+    return 2;
+  }
   if (wwn_watchdogd_job_restore() != 0 ||
       wwn_safety_postflight("heal") != 0) {
     fprintf(stderr, "wwn-safety: heal HARD FAIL: still uncovered\n");

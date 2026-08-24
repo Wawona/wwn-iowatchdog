@@ -107,14 +107,19 @@ static int write_restore_plist(void) {
           "  sleep 1; "
           "done; "
           "/bin/launchctl enable system/com.apple.watchdogd; "
-          "/bin/launchctl bootstrap system "
+          "if ! /usr/bin/pgrep -qx watchdogd; then "
+          "  /bin/launchctl bootout system/com.apple.watchdogd 2>/dev/null; "
+          "  /bin/launchctl bootstrap system "
           "/System/Library/LaunchDaemons/com.apple.watchdogd.plist "
           "2>/dev/null; "
+          "fi; "
           "alive=0; "
-          "for j in $(seq 1 30); do "
-          "  /bin/launchctl kickstart system/com.apple.watchdogd 2>/dev/null; "
+          "for j in $(seq 1 40); do "
           "  if /usr/bin/pgrep -qx watchdogd; then "
-          "    alive=1; break; "
+          "    sleep 1.5; "
+          "    if /usr/bin/pgrep -qx watchdogd; then alive=1; break; fi; "
+          "  else "
+          "    /bin/launchctl kickstart system/com.apple.watchdogd 2>/dev/null; "
           "  fi; "
           "  sleep 0.2; "
           "done; "
@@ -665,8 +670,9 @@ static int do_uninstall(void) {
 
   /*
    * Order matters: enable Apple first, then bootout our holders (Path B may
-   * be the live watchdogd), then restore+kickstart in a tight loop so the
-   * uncovered window is minimal.
+   * be the live watchdogd). Wait until that binary is gone before starting
+   * Apple (a second /usr/libexec/watchdogd is SIGTRAP class). Restore
+   * re-registers IOKit LaunchEvents; kickstart without -k is last resort.
    */
   (void)wwn_watchdogd_job_enable();
   launchctl_bootout("com.aspauldingcode.wwn-iowatchdog-claim");
@@ -679,7 +685,12 @@ static int do_uninstall(void) {
   wwn_iow_unlink_quiet(WWN_IOW_CLAIM_PENDING);
 
   int rc = 0;
-  if (wwn_watchdogd_job_restore() != 0 ||
+  if (wwn_watchdogd_wait_gone(5000) != 0) {
+    fprintf(stderr,
+            "wwn-iowatchdog-claim-install: HARD FAIL: watchdogd still alive "
+            "after Path A/B bootout; not starting a second Apple daemon\n");
+    rc = 2;
+  } else if (wwn_watchdogd_job_restore() != 0 ||
       wwn_safety_postflight("uninstall") != 0 ||
       !wwn_safety_reboot_successor_ok()) {
     fprintf(stderr,

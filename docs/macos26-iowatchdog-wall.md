@@ -162,6 +162,10 @@ Evidence: `/tmp/wwn-re/kc/disasm/{newUserClient,userClientClose,userspaceDisable
 `/usr/libexec/watchdogd`. SIP fully disabled here. Hook constructor must
 not crash. Prefer boot-time `DYLD_INSERT` after sticky claim. Current
 `inject-launchd` is echo-only (records hook path; does not attach insert).
+`launchctl kickstart` without `-k` is a oneshot here: watchdogd starts,
+exits 0, launchd does not restart it. Heal must re-register LaunchEvents
+(bootout+bootstrap while the process is already gone) and dwell until
+the daemon stays up. Never `kickstart -k`. Never bootout a live watchdogd.
 
 ### Design consequence
 
