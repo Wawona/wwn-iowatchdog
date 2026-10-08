@@ -90,30 +90,25 @@
             $out/bin/wwn-iowatchdog-patha-amfi-nvram
           runHook postInstall
         '';
-        # Sign after strip. Host /usr/bin/codesign (sandbox PATH has none).
-        # CLI keeps full entitlements (task_for_pid for status).
-        # Claim gets ONLY iowatchdog.user-access (leaner AMFI surface).
-        # Hook: ad-hoc, no private entitlements (runs inside Apple's binary).
-        # claim-install stays WITHOUT private entitlements (interactive arm).
-        # GHA / Determinate sandbox: allow codesign + SecurityServer (else
-        # "Operation not permitted" during fixup after strip).
-        __impureHostDeps = [ "/usr/bin/codesign" ];
-        sandboxProfile = ''
-          (allow process-exec (literal "/usr/bin/codesign"))
-          (allow mach-lookup (global-name "com.apple.SecurityServer"))
-          (allow mach-lookup (global-name "com.apple.taskgated-helper"))
-        '';
+        # Prefer signing after strip when the builder allows /usr/bin/codesign.
+        # Determinate GHA sandboxes reject __impureHostDeps for codesign and
+        # also return EPERM on exec. Skip signing there; `nix run .#install`
+        # / claim-install resigns on the host with the real entitlements.
         postFixup = ''
           ENT=$out/share/wwn-iowatchdog/wwn-iowatchdog.entitlements.plist
           ENT_CLAIM=$out/share/wwn-iowatchdog/wwn-iowatchdog-claim.entitlements.plist
-          /usr/bin/codesign --force -s - --entitlements "$ENT" \
-            $out/bin/wwn-iowatchdog
-          /usr/bin/codesign --force -s - --entitlements "$ENT_CLAIM" \
-            $out/bin/wwn-iowatchdog-claim
-          /usr/bin/codesign --force -s - \
-            $out/lib/libwwn_watchdogd_hook.dylib \
-            $out/bin/wwn-iowatchdog-claim-install \
-            $out/bin/wwn-iowatchdog-patha-amfi-nvram
+          if [ -x /usr/bin/codesign ] && /usr/bin/codesign --force -s - \
+              --entitlements "$ENT" $out/bin/wwn-iowatchdog 2>/dev/null
+          then
+            /usr/bin/codesign --force -s - --entitlements "$ENT_CLAIM" \
+              $out/bin/wwn-iowatchdog-claim
+            /usr/bin/codesign --force -s - \
+              $out/lib/libwwn_watchdogd_hook.dylib \
+              $out/bin/wwn-iowatchdog-claim-install \
+              $out/bin/wwn-iowatchdog-patha-amfi-nvram
+          else
+            echo "wwn-iowatchdog: codesign skipped in this sandbox; resign on install" >&2
+          fi
         '';
         meta = with pkgs.lib; {
           description = "IOWatchdog Mode B tools (Path A entitled claim + Path B interpose; fail-closed soft-inject)";
