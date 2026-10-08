@@ -95,6 +95,14 @@
         # Claim gets ONLY iowatchdog.user-access (leaner AMFI surface).
         # Hook: ad-hoc, no private entitlements (runs inside Apple's binary).
         # claim-install stays WITHOUT private entitlements (interactive arm).
+        # GHA / Determinate sandbox: allow codesign + SecurityServer (else
+        # "Operation not permitted" during fixup after strip).
+        __impureHostDeps = [ "/usr/bin/codesign" ];
+        sandboxProfile = ''
+          (allow process-exec (literal "/usr/bin/codesign"))
+          (allow mach-lookup (global-name "com.apple.SecurityServer"))
+          (allow mach-lookup (global-name "com.apple.taskgated-helper"))
+        '';
         postFixup = ''
           ENT=$out/share/wwn-iowatchdog/wwn-iowatchdog.entitlements.plist
           ENT_CLAIM=$out/share/wwn-iowatchdog/wwn-iowatchdog-claim.entitlements.plist
